@@ -1,7 +1,7 @@
-# Magnet Spike moves — installed recovery-1
+# Magnet Spike controls — v0.1.0-alpha.1
 
-Choose the copied hunter in character slot 3, equipped with **MS Petrified Blade**.
-This guide describes the installed port's inputs. The 160 converted action
+Craft and equip an **MS** weapon from the Magnet Spike smithy category.
+This guide describes the mod's inputs. The 160 converted action
 entries include automatic transitions, recoveries and alternate lead-ins.
 
 ## Recovery at combo ends
@@ -27,8 +27,7 @@ time. Charge holding and the earlier combo attacks do not receive this delay.
 
 Magnet Spike has its own weapon category on the smithy's third category page.
 Names have an **MS** prefix. Its 136 weapon families copy the matching Great
-Sword's materials, costs, unlocks and upgrade branches. Damage now follows the
-[MHGU balance policy](BALANCE.md): raw attack is 95% of the matching Great Sword,
+Sword's materials, costs, unlocks and upgrade branches. Raw attack is 95% of the matching Great Sword,
 with separate move damage tuning. Other equipment stats retain that baseline. Upgrade your
 Magnet Spike through the normal equipment upgrade menu. A family retains its
 model through its levels; branches to a different appearance change models.
@@ -36,23 +35,23 @@ The existing Great Sword tree remains available separately.
 
 ## Button legend
 
-The profile uses buttons by position. Combos below use **Switch labels**.
+Combos below use **Switch labels** and buttons by position.
 `+` means together; `→` means the next input during the follow-up window.
 
-| Control | Position | Xbox | Current keyboard/mouse binding |
-| --- | --- | --- | --- |
-| X | Top face | Y | Left mouse |
-| A | Right face | B | Right mouse |
-| B | Bottom face | A | Space |
-| Y | Left face | X | R key / middle mouse |
-| R | Right shoulder | RB | E |
-| ZR | Right trigger | RT | T |
-| Minus | Minus / select | View / Back | Backspace |
+| Control | Position | Xbox |
+| --- | --- | --- |
+| X | Top face | Y |
+| A | Right face | B |
+| B | Bottom face | A |
+| Y | Left face | X |
+| R | Right shoulder | RB |
+| ZR | Right trigger | RT |
+| Minus | Minus / select | View / Back |
 
 Hold a modifier such as R or ZR before pressing the face button. Release a
 previous face-button press before a new X+A chord, then press X and A together.
-These keyboard bindings come from the isolated profile and can be changed in
-the game's settings. Right-stick aiming has been tested; mouse aim is not
+Use MHGURecomp's keybinding settings to map these Switch buttons to your keyboard
+and mouse. Right-stick aiming has been tested; mouse aim is not
 covered by the same checks.
 
 ## Drawing, movement and switching
@@ -127,7 +126,7 @@ releases the weaker third strike. Use the charge cue rather than a fixed time
 from the first attack. Stationary A and walking A start different Impact routes.
 For the horizontal chain, draw with X+A, then A → X+A → X+A.
 
-In `parity-2`, B can roll out of the Triple Strike charge during its early and
+B can roll out of the Triple Strike charge during its early and
 late cancel windows. There is a short blocked interval between them. Moving
 the stick uses the drawn-movement cancel where that window permits it.
 
@@ -179,4 +178,4 @@ Major normal-control paths, live pins, Magnetise and Cutting guard/counter have
 automated gameplay evidence. All 160 action entries start in smoke tests;
 every listed follow-up window, alternate lead-in and camera/style option has
 not been individually playtested. This remains an experimental port; see
-`README.md` and `moveset-verification.json` for remaining fidelity work.
+[README.md](README.md) and [COMPATIBILITY.md](COMPATIBILITY.md) for the tested scope.
