@@ -1,0 +1,56 @@
+{
+  "mod_version": "v0.1.0-alpha.1",
+  "build_revision": "recovery-1",
+  "game": "MHGU 1.4.0",
+  "language": "English",
+  "runtime": "official MHGURecomp 0.18.0 Windows x64",
+  "runtime_download_sha256": "f29342e8d58a4dda1e1ca5aa580dc048834cc3ea53c633c99e83df07cc509ce6",
+  "runtime_executable_sha256": "286be3af1fe5aee7649bb548c33d550b8d52e97f931eafc9db6d6c030d6571b7",
+  "module_sha256": "5041e364e88dc2cf0dde68141085b7ea95fe2b5103ec43eb35b82a07bda3409d",
+  "normal_builtin_mod_loader": true,
+  "tests": [
+    {
+      "scenario": "Equipped Magnet Spike: startup, normal right-button combo and finisher recovery",
+      "passed": true,
+      "checks": {
+        "normal_exit": true,
+        "no_fatal": true,
+        "source_saves_unchanged": true,
+        "release_payload_unchanged": true,
+        "module_started": true,
+        "normal_mod_loader_saw_romfs": true,
+        "ready_condition_seen": true,
+        "muted": true,
+        "normal_three_hit_combo": true,
+        "finisher_recovery": true
+      }
+    },
+    {
+      "scenario": "Unmodified save with no Magnet Spike gear: normal town startup",
+      "passed": true,
+      "checks": {
+        "normal_exit": true,
+        "no_fatal": true,
+        "source_saves_unchanged": true,
+        "release_payload_unchanged": true,
+        "module_started": true,
+        "normal_mod_loader_saw_romfs": true,
+        "ready_condition_seen": true,
+        "muted": true,
+        "no_preinjected_weapon": true
+      }
+    }
+  ],
+  "payload_exactly_matches_installed_recovery_1": true,
+  "prior_checks": {
+    "ARM_recovery_checks": 441,
+    "native_command_rows": 129,
+    "recovery_validation_gates": 19
+  },
+  "limits": [
+    "These are focused smoke tests, not a complete hunt campaign.",
+    "No fresh smithy transaction was performed on the official0.18.0 runtime in these smoke tests; prior crafting evidence used the same guest game and mod code.",
+    "Multiplayer, other languages/platforms and general mod combinations are not validated.",
+    "Long-hunt, faint/capture/multiple-large-monster coverage remains incomplete."
+  ]
+}

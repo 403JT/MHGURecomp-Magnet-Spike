@@ -1,0 +1,26 @@
+name: Bug report
+description: Report a problem with the Magnet Spike alpha
+body:
+  - type: input
+    id: versions
+    attributes:
+      label: Mod version, MHGURecomp version and operating system
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps, quest/monster, weapon/form and inputs
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Expected and actual result
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Screenshots or reviewed log excerpts
+      description: Do not attach saves, game files, keys or credentials. Logs may contain local paths.

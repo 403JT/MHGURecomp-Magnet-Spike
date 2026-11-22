@@ -1,0 +1,26 @@
+# Game data and anything derived from it stays out of git (ported assets stay local, never in a public repo).
+# Rebuild them with the tools/ converters from your own 4U / GU dumps.
+dump/
+monsters/*/romfs/
+monsters/*/romfs-*/
+# generated tables holding 4U text / records (monsters/<name>/tools/*.py -> monsters/<name>/gen/)
+monsters/*/gen/
+# map packages (maps/<name>): their converted RomFS
+maps/*/romfs/
+# ported weapon classes: converted RomFS files and generated tables (weapons/<name>/tools -> romfs/, gen/)
+weapons/*/romfs/
+weapons/*/gen/
+# emulator data dir of tools/ryutest.sh (holds prod.keys / title.keys and a save copy)
+ryuroot/
+save-backup-*/
+# build output, caches
+module/out/
+installer/target/
+installer/dist/
+__pycache__/
+*.pyc
+.venv/
+.claude/
+# personal install script and its saved choices
+/install.sh
+/.install.state

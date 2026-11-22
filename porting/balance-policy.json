@@ -1,0 +1,32 @@
+{
+  "revision": "balance-1",
+  "status": "experimental_balance_1",
+  "raw_percent": 95,
+  "element_percent": 100,
+  "magnetise_percent": 110,
+  "motion_percent": {
+    "cutting": 100,
+    "impact": 100,
+    "charged_impact": 22,
+    "pin_finisher": 25,
+    "magnetic_shock": 75
+  },
+  "source_motion_percent": {
+    "attack:24": 64,
+    "attack:21": 64,
+    "attack:22": 50,
+    "attack:23": 50,
+    "attack:27": 85,
+    "attack:28": 85
+  },
+  "action_motion_percent": {
+    "28": 32
+  },
+  "source_ko_overrides": {
+    "attack:30": 50,
+    "attack:29": 30
+  },
+  "target_ttk_tolerance_percent": 20,
+  "target": "Arithmetic mean of normalized controlled kill times of the eleven original hunter melee classes; Guild style, matched progression, no armor/talisman/Arts or companion damage.",
+  "limits": "Held target motion; scripted normal inputs are a repeatable proxy, not expert play or unrestricted hunt times."
+}

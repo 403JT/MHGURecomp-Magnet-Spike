@@ -1,0 +1,277 @@
+/* ms.h: the Magnet Spike as MHGU's class 5 (box type 12): Phase 3 full moveset (weapons/magnet_spike/notes/
+ * phase3.md, mechanics.md, gu-weapon-class.md). Built only with MS_SLICE (module/build.py adds this folder, its hooks
+ * and patches). The class object is a Great Sword object (same size, base ctor) whose vtable is ms_class.c's copy:
+ * every slot the Great Sword overrides is replaced by a Magnet Spike function or the engine's common default. The
+ * actions are MHF's, run from gen/ms_data.inc (msbuild.py); the mechanics are MHF's MS code (mechanics.md). */
+#pragma once
+#include <stdint.h>
+#include "util.h"
+#include "game.h"
+#include "ms_recovery.h"
+
+enum { R0, R1, R2, R3, R4, R5, R12, LR };
+
+#define MS_CLASS 5u
+#define MS_TYPE 12u                 /* box equipment type = class + 7 */
+#define MS_PLAYERS 4
+
+/* Heap pointers differ between the recomp and the emulator used upstream.
+ * Recomp's bounds are runtime/rt.h HEAP_BASE .. HEAP_BASE + HEAP_MAX.
+ * Object identity checks still follow the range check before a proxy is used. */
+#ifdef MS_RECOMP
+#define MS_HEAP_POINTER_MIN 0x08000000u
+#define MS_HEAP_POINTER_END 0xa8000000u
+#else
+#define MS_HEAP_POINTER_MIN 0x10000000u
+#define MS_HEAP_POINTER_END 0xf0000000u
+#endif
+
+/* generated tables (gen/ms_data.inc) */
+struct ms_pair { uint8_t inp, cond; };                                        /* class id k = MHF input + condition */
+struct ms_step { uint16_t kind, mot, start, blend, frame, loops, table; };   /* MHF step; mot = bank-5 slot */
+struct ms_event { uint8_t step, when; uint16_t frame, loop; uint8_t lvl, id; uint16_t prm, hit; };
+struct ms_fxpost { uint16_t mot, frame, action; uint8_t gate; uint16_t id; uint8_t n, mode, joint; int16_t off[3]; };   /* msfxposts.py, msbuild.fx_post_tables */
+struct ms_fxq { uint16_t delay, id; uint8_t n; };
+#define MS_FXQ_MAX 12
+#define MS_FXH 8                    /* effect handles kept per carrier */
+struct ms_carrier { void *h[MS_FXH]; uint16_t id[MS_FXH]; float at[3], age; };   /* ms_act.c fx_follow: the posted
+                                       proxies, their PEL ids, the point they were posted at, updates since */
+                                    /* when 0 step start, 1 frame, 2 never, 3 charge level >= lvl; id = MHF event */
+struct ms_action { uint16_t no; uint8_t mode, nsteps; uint16_t step0; uint8_t nevents; uint16_t ev0; };
+
+/* per-hunter state: MHF's MS block (ext + 0x1c0, mechanics.md 3) and the player fields its code uses. Times in MHF
+ * ticks (1/30 s) */
+struct ms_state {
+    uint8_t *p;                     /* the class object */
+    uint8_t mode;                   /* MS+0x64: 0 Cutting, 1 Impact (the mode of the last action started) */
+    uint8_t loops;                  /* loop wraps of the current step's motion */
+    uint8_t slot;                   /* the GU attack slot armed last (0 / 1) */
+    uint8_t gc_hits;                /* MS+0x66: guarded hits of the current guard */
+    uint16_t held;                  /* last update's virtual buttons (player +0x13f4) */
+    uint32_t held32;                /* the whole word (+0x13fc): its unknown bits are logged (Minus, test 3) */
+    uint16_t action;                /* the action ms_act last ran */
+    float last_frame;
+    uint32_t fired;                 /* events of the current action already run */
+    uint32_t code_fired;            /* code-spawned hits of the current action already armed */
+    uint32_t flags;                 /* MS+0x5c (mechanics.md 3) */
+    int32_t gauge;                  /* MS+0x7a: 0..10000, 5 bars of 2000 */
+    float regen;                    /* MS+0x7c */
+    uint8_t mag[2];                 /* MS+0x88 per mode: 0 charging, 1 magnetised, 2 lockout */
+    float mag_v[2];                 /* MS+0x8a: charge 0..1000 / timer */
+    uint8_t air, end_on_land, keep_if, charge_lvl;   /* P+0x418 bit 0, P+0x410 == 2, ext+0x284, P+0xb28 */
+    uint8_t air_lifted;             /* GU adaptation: a scheduled leap has actually left the ground */
+    float fwd, vert;                /* ev27 / ev28 drives (units / tick) */
+    uint8_t curve;                  /* MS+0x6d: drive curves, low nibble forward, high vertical (ev29 / ev30) */
+    float fwd_n, vert_n, fwd_k, vert_k;   /* MS+0x6e / +0x70: ticks since the drive started; 0.97^n */
+    float grav, grav_t;             /* ev25: y -= grav * 0.1 * t per tick */
+    float fall_g, vy;               /* ev31 custom gravity and the speed it built */
+    float hold_v;                   /* ev33: ticks of zero velocity */
+    float charge;                   /* P+0xb24: Triple Strike charge ticks */
+    float step_t;                   /* ticks in the current step */
+    float action_clock, recovery_end; /* GU game frames; extra combo-end recovery */
+    uint8_t *mk_mon;                /* the monster the marker sticks to (0 none) */
+    uint16_t mk_joint;              /* its joint (0xffff: the stand-in point, the origin + MARKER_Y) */
+    uint8_t shot_on;                /* the marker shot in flight (MHF special #1) */
+    float mk_local[3];              /* the marker point in that joint's frame (MHF: the hit point, bone-local) */
+    float shot_p[3], shot_v[3], shot_t, aim_dir[3];   /* the shot: position, velocity per tick, age; aim direction */
+    float mk_t;                     /* marker lifetime */
+    uint8_t att;                    /* attraction phase: 0 off, 1 lift, 2 fly, 3 fall */
+    float att_t, att_h, dir[3];
+    float att_y0, att_b, att_tg[3];  /* MHF MS+0x3c start height, +0x40 flight budget, +0x24 target point */
+    float att_all, rail_t, beam_t, rep_t;   /* ticks since the attraction's start; its rail / beam timers; the
+                                               repulsion's t2 posts */
+    uint8_t rail_n;
+    uint8_t mz_on, mz_mode, mz_k;   /* Magnetise's look (MHF MS task 0xd / 0xe): on, its mode, the next spot */
+    float mz_t, mz_spot, mz_pulse;
+    uint8_t *pin_mon, *pin_pending; /* the pinned monster; the one the pin attack hit (started next update) */
+    float pin_hold, pin_cd, qte, pin_off[3];
+    uint16_t pin_yaw_m, pin_yaw_p;
+    uint16_t armed[2];              /* hit-data entry armed in each attack slot */
+    uint16_t chk_hit;               /* hit check pending (ms_act.c hit_check) at motion frame chk_f */
+    float chk_f;
+    uint8_t tr_n, tr_slot;          /* attack-slot trace (ms_act.c slot_trace): updates left, slot */
+    uint16_t tr_hit;
+    uint16_t was_no; uint8_t was_st; float was_f, if_given;   /* hit diag: the action before a hit */
+    float keep_t; uint16_t keep_no; /* event 9's keep (keep_if): ticks on, the action that set it (log only) */
+    uint8_t shock_on, shock_k;      /* Magnetic Shock 5 x 3 task running, spots spawned */
+    float shock_t;                  /* its ticks */
+    float mk_blink, aura_t;         /* ticks to the marker's and Magnetise's next flash */
+    uint32_t fx_mot;                /* MHF effect posts (ms_act.c fx_posts): the motion they were armed for */
+    uint8_t fx_done[32];            /* rows of ms_fxposts posted in this motion run (from fx_first) */
+    uint16_t fx_first;              /* the motion's first row (ms_fxposts is sorted by motion) */
+    uint8_t aim_view;               /* GU's aim view (camera + scope HUD) started by aim_view() */
+    uint8_t aim_log;                /* "aim tick" log lines left after "aim view on" */
+    float aim_yaw, aim_pitch;       /* the aim look (ms_act.c aim_look): yaw in u16 units (hunter-yaw sense, the
+                                       camera looks along it), pitch in u16 units (GU's +0x2714 sense) */
+    float fxq_t[MS_FXQ_MAX];        /* queued event posts: frames left (0 = free slot) */
+    uint16_t fxq_id[MS_FXQ_MAX];
+    uint8_t fxq_n[MS_FXQ_MAX];
+    struct ms_carrier mk_c, shot_c; /* MHF's marker (fc5:e) / shot (fc5:b) effects, moved every update */
+    float shot_o[3];                /* the shot's start (its trail fc5:a at 100 / 300 / 600 / 1000 / 1500 from it) */
+    uint8_t trail_k;                /* trail points posted */
+    float mk_fx_t;                  /* (unused since test 22: the marker effect moves every update) */
+    float shot_near, shot_near_t;   /* the shot's closest pass to a hurt volume surface (cm, -1 none) and its tick */
+    uint8_t *shot_near_m;           /* that volume's monster */
+    uint16_t shot_near_j;           /* its joint */
+    uint8_t att_mark;               /* the attraction's fc5 7 at the marker posted (MHF f10) */
+    uint32_t snd_mot, snd_done[2], snd_rng;
+    float snd_frame,snd_floor;
+    uint16_t snd_first;
+    uint32_t snd_code_done;
+    uint16_t snd_code_first;
+    uint8_t snd_fx13;
+    float snd_guard_delay;
+};
+struct ms_state *ms_of(uint8_t *p);
+struct ms_state *ms_find(uint8_t *p);
+void ms_reset(struct ms_state *s);
+int ms_local_sound_file(uint32_t *regs);
+int ms_sound_post(uint8_t *p, unsigned slot, unsigned request);
+int ms_sound_post_at(uint8_t *p, unsigned slot, unsigned request, const float *pos);
+void ms_sound_tick(uint8_t *p, struct ms_state *s, float tk);
+void ms_sound_guarded(uint8_t *p, struct ms_state *s);
+float ms_motion_start(uint8_t *p,uint32_t motion);
+void ms_apply_hit_stats(uint8_t *p,unsigned slot,unsigned hit);
+void ms_world_hit_armed(uint8_t *p,unsigned slot,unsigned hit,int world);
+void ms_world_hits_reset(uint8_t *p);
+void ms_cancel_windows_reset(uint8_t *p);
+int ms_monster_pin_begin(uint8_t *p,uint8_t *m);
+void ms_monster_pin_end(uint8_t *p);
+int ms_monster_pin_valid(uint8_t *p,uint8_t *m);
+
+/* GU calls (main offsets, C unless marked; gu-weapon-class.md, mechanics.md "GU side") */
+typedef void (*ms_setmot_t)(void *p, uint32_t motion, float blend, float start);
+#define MS_SET_MOTION FN(ms_setmot_t, 0x281998)       /* motion = bank * 1000 + slot */
+typedef int (*ms_p_t)(void *p);
+#define MS_MOTION_END(p) ((FIELD(uint8_t, (p), 0x4b0 + 6) & 7) >> 2)   /* 0x950bcc(p + 0x4b0) */
+#define MS_FRAME(p) FIELD(float, (p), 0x4fc)          /* the motion's frame (+0x4f4 = the blend countdown, +0x504
+                                                         the end, +0x508 the loop start, +0x50c the speed) */
+#define MS_MOT_SPEED(p) FIELD(float, (p), 0x50c)
+typedef int (*ms_reached_t)(void *p, float frame);
+#define MS_REACHED FN(ms_reached_t, 0x280e4c)         /* the frame after this tick's advance (+0x14d0 + +0x14d4,
+                                                         wrapped on a loop) >= frame; 0 while blending: the classes'
+                                                         own step and event check */
+typedef uint32_t (*ms_curmot_t)(void *u);
+#define CUR_MOTION FN(ms_curmot_t, 0x53a058)          /* the unit's motion as bank * 1000 + slot */
+typedef void (*ms_settbl_t)(void *p, uint32_t table, int frame);
+#define MS_SET_TABLE FN(ms_settbl_t, 0x2e9b7c)        /* clears the buffered commands */
+typedef void (*ms_settbl2_t)(void *p, uint32_t table, int frame, int keep);
+#define MS_SET_TABLE_KEEP FN(ms_settbl2_t, 0x2e9c50)
+typedef void (*ms_flags_t)(void *p, uint32_t flags, uint32_t a, uint32_t b);
+#define MS_ACTION_FLAGS FN(ms_flags_t, 0x282fd8)
+typedef void (*ms_setact_t)(void *p, uint32_t st, uint32_t no, uint32_t x);
+#define MS_SET_ACTION FN(ms_setact_t, 0x2831e0)
+typedef void (*ms_end_t)(void *p, uint32_t sheathed, uint32_t blend, uint32_t x, uint32_t flags, uint32_t a5,
+                         uint32_t a6);
+#define MS_TO_NEUTRAL FN(ms_end_t, 0x2b6e94)          /* vt+0x68c (0x2b6f68, 3 stack args): back to the neutral
+                                                         action; flags = the set-action flags (slot 190), GS: 0 */
+typedef void (*ms_arm_t)(void *p, uint32_t slot, uint32_t hit, uint32_t type);
+#define MS_ARM FN(ms_arm_t, 0x2b7240)                 /* attack slot from pl_we05_hitdata[hit] */
+typedef void (*ms_setid_t)(void *p, uint32_t id);
+#define MS_SET_CLASS_ID FN(ms_setid_t, 0x285e54)      /* player +0x1424 bit */
+typedef void (*ms_flagb_t)(void *p, uint32_t on);
+#define MS_DRAW_FLAG FN(ms_flagb_t, 0x2a264c)         /* +0x2749 bit 3, set by the draw attacks */
+#define MS_VT(p, off) (*(uint32_t **)(p))[(off) / 4]
+typedef void (*ms_iframes_t)(void *p, float frames, int force);
+#define MS_IFRAMES FN(ms_iframes_t, 0x2a6760)         /* i-frame timer +0x2b40 (1/60-s frames): max(t, n), = n
+                                                         if force */
+typedef int (*ms_evlvl_t)(void *p, uint32_t skill);
+#define MS_EVASION FN(ms_evlvl_t, 0x2a69dc)           /* Evasion level 0 / 1 / 2 (GU's roll asks with 0x1f) */
+#define MS_HAS_SKILL FN(ms_evlvl_t, 0x2864c4)         /* the hunter has skill effect id (GU's guard code: 14, 15) */
+typedef void (*ms_stam_t)(void *p, float amount, int flag);
+#define MS_STAMINA FN(ms_stam_t, 0x2a5ebc)            /* action cost (< 0) with Constitution; 150 = a roll */
+#define MS_STAMINA_NOW(p) FIELD(float, (p), 0x13e0)   /* 6 x the displayed value (S) */
+typedef void (*ms_bits_t)(void *p, uint32_t a, uint32_t lo, uint32_t hi);
+#define MS_BITS_SET FN(ms_bits_t, 0x283238)           /* action flags +0x2510 / +0x2514 (cleared per action) */
+#define MS_BITS_CLEAR FN(ms_bits_t, 0x28321c)
+#define MS_GUARDING 0x10                              /* +0x2510 bit: "guarding now" (the can-guard check) */
+typedef void (*ms_p0_t)(void *p);
+#define MS_GUARD_STAMINA FN(ms_p0_t, 0x2a609c)        /* -150 / -200 / -360 by the attack's guard power */
+typedef void (*ms_shake_t)(void *p, uint32_t preset, uint32_t flags);
+#define MS_SHAKE FN(ms_shake_t, 0x2a063c)             /* camera shake (local hunter); 0xf = GS's landing */
+typedef int (*ms_land_t)(void *p, float eps, float *ground);
+#define MS_LANDED FN(ms_land_t, 0x2a84d8)             /* 1 when y <= ground + eps: move state 0, y = ground */
+#define MS_GROUND_Y(p) FIELD(float, (p), 0x10f0)      /* the ground probe's height under the hunter */
+typedef void (*ms_mstate_t)(void *p, uint32_t state);
+#define MS_MOVE_STATE(p, st) ((ms_mstate_t)MS_VT(p, 0x300))(p, st)   /* +0x2505: 0 ground, 2 air */
+typedef uint8_t *(*ms_em_t)(void *mgr, int i);
+#define MS_EM_GET FN(ms_em_t, 0x5ceb4)                /* monster slot 0..9 of the manager *(MAIN 0x1851fe0) */
+#define MS_EM_MGR (*(void **)MAIN(0x1851fe0))
+#define MS_CAM_MGR (*(uint8_t **)MAIN(0x2126504))     /* +0x54 = the camera: eye +0x40, look-at +0x60 */
+/* GU's aim view (ms_act.c aim_view / ms_after_update / ms_aim_cam, C; mechanics.md "Port (aim view)"): the player
+ * byte +0x2716 (vt+0x1c8 = 0x2a1c48) gates the quest camera's aim (0x23ebc ends it once the byte reads 0) and the
+ * scope HUD (cUIOQuestScope, made for every class by 0x6658ec; update 0x61e1f4 -> 0x61e438 state 8 -> 0x61e834);
+ * 0x1baa4(camera manager, mode) starts the camera's aim (+0xacc; mode +0xac8, settled +0xa60) as the bowguns'
+ * 0x2a039c does, mode from 0x2a0520(p); local hunter = +0x13cc bit 0 (0x27bcd0). GU's 0x29fb8c (end of the player
+ * update 0x29b8e8, after slot 139) clears the byte and +0x2714 every update for a drawn non-bowgun outside common
+ * actions 1/97-98 (0x29fe90): slot 45 (+0xb4, called right after it) sets them again. Aim mode 0 (0x23f24): camera
+ * yaw +0x9dc = hunter +0x14a0 (the turn target: face() writes it with +0xfec) + 0x8000, pitch +0x9d8 = (s16) +0x2714,
+ * then vt+0x410(p, out, 0) (slot 260): ours writes the look there instead of turning the hunter */
+#define MS_AIM_BYTE(p) FIELD(uint8_t, (p), 0x2716)
+#define MS_IS_LOCAL(p) (FIELD(uint32_t, (p), 0x13cc) & 1)
+typedef void (*ms_camaim_t)(void *mgr, int mode);
+#define MS_CAM_AIM FN(ms_camaim_t, 0x1baa4)
+#define MS_AIM_MODE FN(ms_p_t, 0x2a0520)
+#define MS_AIM_PITCH(p) FIELD(int16_t, (p), 0x2714)
+typedef void (*ms_p1_t)(void *p);
+#define MS_AFTER_UPDATE_GU FN(ms_p1_t, 0x281ef8)      /* slot 45 of every class */
+typedef void (*ms_aimoff_t)(void *p, void *out, int k);
+#define MS_AIM_OFF_GU FN(ms_aimoff_t, 0x2a714c)       /* slot 260 of GS (and so ours): only k 0xc does anything */
+/* GU's aim-direction reader 0x27d5c4(p, sources, &dirs, &magnitude) -> 1 when a source is past 0x31; source 1 = the
+ * movement stick at +0x140c angle / +0x1410 magnitude (also read by 0x27e608(p,0)). Source 2 reads
+ * the camera stick at +0x140e / +0x1412, with direction bits at +0x13fc.
+ * dirs: 4 / 8 = yaw + / -, 1 / 2 = pitch + / - (0x2a07a8 -> 0x2a1738), after the camera-invert options GU applies
+ * inside (vt+0x1b0 0x400000) and in 0x2a07a8 (global *0x188ca48 +0x66: 1 / 3 swap 1-2, 2 / 3 swap 4-8) */
+typedef int (*ms_dirs_t)(void *p, uint32_t sources, uint32_t *dirs, int16_t *magnitude);
+#define MS_AIM_DIRS FN(ms_dirs_t, 0x27d5c4)
+#define MS_OPT_OBJ (*(uint8_t **)MAIN(0x188ca48))   /* +0x66 = the aim-invert option read by 0x2a07a8 */
+#define MS_DTI_QCAM 0x184d8b8                         /* uQuestCamera (0x1baa4 / 0x1bb14 test the camera's DTI chain) */
+#define MS_U16_RAD 9.58738e-5f                        /* u16 angle -> radians */
+/* effects: GU's code post vt+0x39c (p, id, p + 0x2550, 1) = 0x282624 -> the +0x2634 job's slot 0x150, as GU's
+ * classes call it (GS: ids 6 / 7 / 36, list 1), returned 0 for every id under class 5 (tests 3-5, GS's own flash 7
+ * included). Posted straight through the player's wrapper 0x282548(unit, list handle, list, id, req, extra) ->
+ * 0x53b500 -> 0x40978 with the class list handle +0x3304 (0x29adbc: file ID 0x162868c[class], class 5 = 0x89a =
+ * effect\pel\pl\w05_000; extra 0 = none, null-checked in 0x42f08) */
+typedef void *(*ms_post_t)(void *unit, void *pel, uint32_t list, uint32_t id, void *req, void *extra);
+#define MS_POST FN(ms_post_t, 0x282548)
+static inline void *ms_post(uint8_t *p, uint32_t id, void *req)
+{
+    void *pel = FIELD(void *, p, 0x3304);
+    return pel ? MS_POST(p, pel, 1, id, req, 0) : 0;
+}
+#define MS_EFFECT(p, id) ms_post((uint8_t *)(p), id, (uint8_t *)(p) + 0x2550)
+/* a converted MHF effect = id##_N PEL records from id (one per MHF base offset, msbuild FLASH_IDS); the first handle */
+static inline void *ms_post_n(uint8_t *p, uint32_t id, uint32_t n)
+{
+    void *h = 0;
+    for (uint32_t k = 0; k < n; k++) { void *x = ms_post(p, id + k, p + 0x2550); if (!h) h = x; }
+    return h;
+}
+#define MS_EFFECT_N(p, id) ms_post_n((uint8_t *)(p), id, id##_N)
+/* live effects (em089_efx.c, C): 0x32a45c(eff, pos, 0) moves one, 0x32a400(eff, 0) stops it (its particles finish);
+ * alive while (eff+0xc & 7) is 1 or 2 */
+typedef void (*ms_efx_pos_t)(void *eff, const float *pos, int32_t k);
+#define MS_EFX_SET_POS FN(ms_efx_pos_t, 0x32a45c)
+typedef void (*ms_efx_stop_t)(void *eff, uint32_t now);
+#define MS_EFX_STOP FN(ms_efx_stop_t, 0x32a400)
+static inline int ms_efx_alive(void *e) { return e && (FIELD(uint32_t, e, 0xc) & 7) - 1u < 2u; }
+typedef void (*ms_req_t)(void *req);
+#define MS_REQ_CTOR FN(ms_req_t, 0x40b10)             /* a proof-effect request (~0xd8 B, em089_efx.c): +0x1c flags (bit
+                                                         0 = at the world position +0xc0), +0xd0 attach model */
+#define MS_REQ_DTOR FN(ms_req_t, 0x40b50)
+/* MS_EFX_CHARGED / GUARD / MAGNETISE (ms_data.inc, msfx.FLASH_EFX): copies of GS's charge flashes 7 / 9 / 11 in PEL
+ * lists 1 and 2 (ms_post asks list 1, test 5); stand-ins used only with the MHF effects off */
+
+static inline int ms_drawn(uint8_t *p) { return ((int (*)(void *))MS_VT(p, 0x178))(p) == 1; }
+
+void ms_act(uint8_t *p);            /* ms_act.c: slot 201 */
+void ms_input(uint8_t *p);          /* ms_act.c: slot 139 */
+int ms_weapon_element(uint32_t id, uint32_t *type, uint32_t *value);   /* ms_class.c: record id -> element, GU units */
+void ms_on_hit(uint8_t *p, uint8_t *atk, uint8_t *mon, uint32_t kind);      /* ms_act.c: slot 37 */
+void ms_guarded(uint8_t *p, uint32_t level, uint8_t *info, int32_t *dmg);   /* ms_act.c: slot 356 */
+int ms_invuln(uint8_t *p);          /* ms_act.c: slot 44 */
+void ms_after_update(uint8_t *p);   /* ms_act.c: slot 45 (+0xb4) */
+void ms_aim_cam(uint8_t *p, void *out, int k);    /* ms_act.c: slot 260 (+0x410) */
+void ms_reticle(int frame);         /* ms_class.c: the scope HUD shows MHF's reticle frame (-1 = GU's) */
+void ms_init(void);                 /* ms_class.c, from module_init */
+void ms_text_loaded(uint8_t *m, const char *name, uint32_t lang);           /* ms_class.c, from items.c */

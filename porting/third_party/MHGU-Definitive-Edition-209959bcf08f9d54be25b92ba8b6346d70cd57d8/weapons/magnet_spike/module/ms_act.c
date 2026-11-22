@@ -1,0 +1,1954 @@
+/* ms_act.c: the Magnet Spike's inputs, mechanics and actions (MS_SLICE; notes/phase3.md, notes/mechanics.md).
+ *
+ * Inputs (slot 139, +0x22c, the class translator; GS's is 0x1160058): GU turns the pad into virtual buttons (player
+ * +0x13f4 held, +0x13f8 pressed) and press combos (+0x1444, after a short simultaneity window: bit 2 = X alone, 4 = A
+ * alone, 0x40 = X + A); the translator sets the class's input ids (+0x1424, 0x285e54) that plcmd_w05 commands test
+ * (cmd_type 8, 0xc = stick tilted + id). Id k (+ MS_ID_IMPACT in Impact) = the MHF (input, condition) pair
+ * ms_pairs[k]: it is set while MHF's input test and cancel condition both hold (mechanics.md 2). MHF -> the pad by
+ * position (MHF's MS keyconfig; PAD_* below): tri = top, circle = right, special(A) = bottom, the MS evade = left,
+ * R1 = GU's R role, R2 = ZR, SELECT = Minus, L2 (aim) = ZR alone.
+ *
+ * Mechanics (MHF ticks of 1/30 s = dt / 2, dt = player +0x1c in 1/60-s frames): the magnet gauge and Magnetise
+ * (every update, from the translator), the marker, the attraction, the pin, the Triple Strike charge and the guard
+ * counter (ms_act, the guard / hit callbacks). MHF's constants are its MS block parameters (mechanics.md); S values
+ * are marked.
+ *
+ * Actions (slot 201, +0x324; act_st 0x10, act_no = MHF action number): MHF's step machine (msact.py) on GU's motion
+ * and command calls. Step 0: MHF's action start (flags kept 0x1 / 0x10 / 0x40 / 0x1000 / 0x8000, the motion fields
+ * cleared, the gauge bar of the costed actions paid, the mode) and GS's action flags and drawn flag (0x282fd8,
+ * vt+0x46c(p, 1)); then each step: motion 5000 + slot from its start frame with its blend, the step's command table
+ * (2000 + k; later steps keep the buffered presses, 0x2e9c50 keep 1), its events by MHF id. Step kinds: 3 play
+ * (loops), 4 until a frame, 5 hold (until the code that drives it ends it: landing, the attraction, the pin),
+ * 0 / 1 / 2 go to an action. After the last step: back to GU's drawn neutral (0x2b6e94 as GS). MHF's shared 207
+ * (guard counter success) and 208 (charge release) pick their action here; unknown numbers: GU's base handler. */
+#include "ms.h"
+#include "ms_data.inc"
+
+/* GU's virtual pad bits (+0x13f4 held, +0x13f8 pressed), named by position on the maintainer's pad (Ryujinx maps by
+ * position; Xbox letters). Tests 10 / 13 (every press and the action it started): 0x80 starts GU's rolls 1/6, 1/13,
+ * 1/14 = the bottom button; 0x10 its sheathe 1/3 = the left one. MHF's MS keyconfig (Rain Client/keyconfig.cfg,
+ * category 13): tri = top, circle = right, special(A) (key 0xeb, the repulsion) = bottom (pad bit 1, DRD), the MS
+ * evade (R1 + evade) = left (DRL). */
+#define PAD_L 0x10                  /* Xbox X: MHF's MS evade */
+#define PAD_U 0x20                  /* Xbox Y: tri */
+#define PAD_D 0x80                  /* Xbox A: special(A); GU's roll */
+#define PAD_R 0x100                 /* Xbox B: circle */
+/* the others (+0x13f4; the control type swaps 0x40 / 0x800 and 0x200 / 0x400, roles 0x65f93c / 0x65f9b4 /
+ * 0x65f8ec): d-pad 0x1-0x8, R 0x40, ZL 0x200, L 0x400, ZR 0x800 under the maintainer's type (0x400 = GU's
+ * camera-reset role 0x27e970; test 3: ZL switched modes, as MHF's SELECT read 0x200) */
+#define BTN_MINUS 0x4000u           /* MHF's SELECT = Minus (the user's Back): test 4 log, Back held = 0x4000 (pressed
+                                       0x5000); 0xf000 also took Plus */
+#define BTN_ZR 0x800                /* MHF's R2 and L2 (user, test 2): ZR held = aim, R + ZR = Guard Counter */
+#define CID_SHEATHE (3u << 13)      /* GU's common ids 0xd / 0xe (+0x1414): sheathe standing / moving (1/2, 1/3) */
+/* GU's rolls (plcmd_com_0x0001_006d / 6e / 6f -> 1/6: common ids 4, 24, 38; 013a / 014a -> 1/13, 1/14: 49, 50) */
+#define CID_ROLL_LO ((1u << 4) | (1u << 24))        /* +0x1414 */
+#define CID_ROLL_HI ((1u << 6) | (3u << 17))        /* +0x1418 */
+typedef uint32_t (*ms_mask_t)(void);
+#define R_MASK FN(ms_mask_t, 0x65f93c)   /* GU's R role: 0x40, or 0x800 under the other option (GS's translator) */
+typedef void (*ms_pre_t)(void *p);
+#define INPUT_PRE FN(ms_pre_t, 0x27e770)   /* GS's translator calls it first */
+
+/* MHF's MS parameters (mhfdat block 0xdc1a20 + 0x14, mechanics.md) */
+#define BAR 2000                    /* prm19: one gauge bar */
+#define GAUGE_MAX 10000             /* prm17 */
+#define REGEN 200                   /* prm20 every prm21 = 30 ticks */
+#define HIT_GAIN 600                /* prm37: gauge + 600 * MV / 100 per hit */
+#define MAG_CHARGE 80               /* prm58: Magnetise charge + MV * 80 / 100 per hit */
+#define MAG_READY 1000              /* prm56 */
+#define MAG_TIME 2400               /* prm60 */
+#define MAG_LOCK 3000               /* prm59 */
+#define MARKER_TIME 9000            /* prm14 */
+#define FALL_HEIGHT 200             /* prm36: condition 9 */
+#define CHARGE_T 20                 /* Triple Strike charge (0x103332f0 kinds 3 / 5, asm): level 1 at prm33 20 ticks, */
+#define CHARGE_OVER 34              /* overcharged at prm33 + prm34 = 34 (one counter; skills 0x12e-0x130 scale it) */
+#define MARKER_Y 300                /* S: the marker's height over the monster's origin (no shot point in GU) */
+#define MARKER_RANGE 5000           /* S: the shot's reach (a projectile in MHF, its range not traced) */
+#define PIN_HOLD 60                 /* S: the pin's initial hold (MHF's comes from the monster, 0x101bc490) */
+#define PIN_HOLD_MAX 90             /* S */
+#define QTE_WIN 70                  /* prm41 70 %, of a 100-point bar (S) */
+
+static const uint8_t s_cost[] = {11, 12, 38, 39, 51, 53, 58, 61, 62, 66, 67, 68, 71, 72, 94, 97, 106, 107, 108, 116,
+                                 117, 135, 136, 138, 146, 158};      /* MS list +0x24: one bar at the start */
+static const uint8_t s_attract[] = {58, 61, 62, 68, 71, 72};
+static const uint8_t s_pinned[] = {98, 99, 105, 157};                /* the hunter rides the pinned monster */
+static const uint8_t s_pin_keep[] = {98, 99, 100, 105, 156, 157};    /* MHF keeps the motion fields */
+static int in(const uint8_t *l, uint32_t n, uint32_t v) { for (uint32_t i = 0; i < n; i++) if (l[i] == v) return 1; return 0; }
+#define IN(l, v) in(l, sizeof l, v)
+
+static float sq(float x) { return x * x; }
+static float root(float x) { float r; __asm__("vsqrt.f32 %0, %1" : "=t"(r) : "t"(x)); return r; }
+static float *pos_of(uint8_t *p) { return &FIELD(float, p, 0x40); }
+static uint32_t yaw_to(float dx, float dz) { return (uint32_t)(int32_t)(atan2f_gu(dx, dz) * 10430.378f) & 0xffff; }
+static void face(uint8_t *p, uint32_t yaw) { FIELD(uint16_t, p, 0xfec) = (uint16_t)yaw; FIELD(uint16_t, p, 0x14a0) = (uint16_t)yaw; }
+/* MHF ticks (30 per s) this update: GU's dt +0x1c counts 1/60 s (C, test 13: 40 updates in 0.326 s with dt 0.5 =
+ * the FPS patch's 120 updates / s, the motion frame + 0.5 per update; test 14: the gauge regen ran 200 per 15 ticks
+ * of real time = 2 x MHF with tick = dt). Test 1's "x 0.5 = half speed" was wrong (its run under 120 updates / s
+ * not checked); this made every MHF timer, the attraction flight and the falls twice MHF's speed until test 14 */
+static float tick_len(uint8_t *p) { return FIELD(float, p, 0x1c) * 0.5f; }
+
+/* diagnostic (tests): every change of the action, its step, the body motion, the weapon's motion (part 0 object
+ * +0x23a0, its +0x4b4 = list << 8 | slot) and the command table (+0x24ac id, +0x24a8 table, +0x24f0 the class list) */
+static void trace(uint8_t *p)
+{
+    static uint32_t s_last[5];
+    static int s_n;
+    uint8_t *w = FIELD(uint8_t *, p, 0x23a0);
+    uint32_t now[5] = {(uint32_t)FIELD(uint16_t, p, 0x2506) << 16 | FIELD(uint16_t, p, 0x250a), FIELD(uint8_t, p, 5),
+                       CUR_MOTION(p), w ? FIELD(uint16_t, w, 0x4b4) : 0xffffu, FIELD(uint32_t, p, 0x24ac)};
+    int same = 1;
+    for (int i = 0; i < 5; i++) same &= now[i] == s_last[i];
+    if (same || s_n >= 600) return;
+    s_n++;
+    for (int i = 0; i < 5; i++) s_last[i] = now[i];
+    logf("msport: state action %u/%u step %u motion %u frame %d weapon %x table %u", now[0] >> 16, now[0] & 0xffff,
+         now[1], now[2], (int)MS_FRAME(p), now[3], now[4]);
+}
+
+/* ------------------------------------------------------------------------------------------------ monsters */
+
+static uint8_t *em_rec(uint8_t *m) { return FIELD(uint8_t *, m, 0x1428); }
+static int em_ok(uint8_t *m)        /* a large monster the hit pass would test (spawned, active, here) and alive */
+{
+    if (!m || !FIELD(uint8_t, m, 0xb5f9) || FIELD(uint8_t, m, 0x7652) != 1 || FIELD(uint8_t, m, 0xb5f7)) return 0;
+    uint8_t *r = em_rec(m);
+    return r && FIELD(uint8_t, r, 0x1a0) && !FIELD(uint8_t, r, 0x444) && FIELD(int32_t, r, 0x370) > 0;
+}
+
+/* the marker's monster still exists and lives (MHF ends the marker on death, area change, a broken part: test 15,
+ * "consumed too fast": em_ok's hurt gates rec+0x1a0 / +0x444 / m+0x7652 drop for moments (around the attraction's
+ * landing), which ended the marker 1.8-4.3 s after the shot; S: the area and part ends are not ported) */
+static int em_alive(uint8_t *m, uint8_t *hunter)
+{
+    void *mgr = MS_EM_MGR;
+    for (int i = 0; m && mgr && i < 10; i++)
+        if (MS_EM_GET(mgr, i) == m) {
+            uint8_t *r = em_rec(m);
+            return !FIELD(uint8_t, m, 0xb5f7) && r && FIELD(int32_t, r, 0x370) > 0 &&
+                   FIELD(uint8_t, m, 0x1054) == FIELD(uint8_t, hunter, 0x1054);   /* MHF: an area change ends it */
+        }
+    return 0;
+}
+
+/* a joint's world matrix (rows +0x10 / +0x20 / +0x30 = axes, +0x40 = position: joints +0x494, index from the id
+ * table +0x498, 160 bytes; GU's 0x53aad8 / 0x53ab30, the same for the hunter and the monsters) */
+static const float *joint_mat(const uint8_t *u, uint32_t id)
+{
+    const uint8_t *ids = u ? FIELD(const uint8_t *, u, 0x498) : 0, *js = u ? FIELD(const uint8_t *, u, 0x494) : 0;
+    if (!ids || !js || ids[id & 0xff] == 0xff) return 0;
+    return (const float *)(js + 0xa0 * ids[id & 0xff] + 0x10);
+}
+
+static int marker(struct ms_state *s, float t[3])
+{
+    /* A cached target may have been removed since the previous player update.
+     * Check the manager before reading its joint or record pointers. */
+    if (!s->p || !em_alive(s->mk_mon, s->p)) return 0;
+    const float *m = s->mk_joint != 0xffff ? joint_mat(s->mk_mon, s->mk_joint) : 0;
+    if (m) {                                            /* MHF (0x101e9450, C): the bone's translation + rotation x
+                                                           the local offset, every tick: the marker follows the part */
+        const float *l = s->mk_local;
+        for (int k = 0; k < 3; k++) t[k] = l[0] * m[k] + l[1] * m[4 + k] + l[2] * m[8 + k] + m[12 + k];
+        return 1;
+    }
+    uint8_t *r = em_rec(s->mk_mon);
+    t[0] = FIELD(float, r, 0x40); t[1] = FIELD(float, r, 0x44) + MARKER_Y; t[2] = FIELD(float, r, 0x48);
+    return 1;
+}
+
+static float marker_dist(uint8_t *p, struct ms_state *s)   /* 3-D, -1 = no marker */
+{
+    float t[3], *q = pos_of(p);
+    return marker(s, t) ? root(sq(t[0] - q[0]) + sq(t[1] - q[1]) + sq(t[2] - q[2])) : -1.0f;
+}
+
+/* the marker shot (82 / 84 event 4 = MHF special #1; MHF 0x101e8de0 / 0x101e9070 / 0x101eb540, C):
+ * - spawn: hunter bone 18 (the -x hand = GU joint 12) + R(yaw) (22, 0, 0) + 20 up;
+ * - velocity: the camera's 3-D view direction at the action start x prm16 = 500 per tick, no gravity;
+ * - life: mhfsdt kind 0x79 record 1 field 1 = 150 ticks (S); it ends below the ground (and on map walls in MHF:
+ *   not tested here, S);
+ * - hit: its sphere (r 30) against the monster's hurt volumes, the hit point kept in the hit bone's frame; a miss
+ *   leaves no marker.
+ * Module: each tick the swept segment against every hurt volume of every large monster, placed as GU places them
+ * (bodydata 0x710b0, world shapes 0x16de70 as the shape cache 0x16abac; push-only records, +10 & 0x100, skipped) */
+#define SHOT_SPEED 500.0f                               /* prm16 */
+#define SHOT_LIFE 150.0f
+#define SHOT_R 30.0f
+#define SHOT_HAND 12                                    /* GU joint of MHF bone 18 (msgrip) */
+struct shape_in { int16_t a, b, shape; uint16_t flag; float radius; uint32_t pad0; float o1[4], o2[4];
+                  uint8_t attach, pad1[3]; float scale; };
+typedef int (*ms_shape_t)(uint32_t mode, void *m, struct shape_in *in, float *out);
+typedef const int16_t *(*ms_bdd_t)(void *m);
+#define MS_SHAPE FN(ms_shape_t, 0x16de70)               /* -> 1 sphere (out p0, radius [8]), else p0 -> p1 */
+#define MS_BODYDATA FN(ms_bdd_t, 0x710b0)               /* 44-B records until bone 0xffff */
+
+static float dot3(const float *a, const float *b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+static float clamp01(float x) { return x < 0 ? 0 : x > 1 ? 1 : x; }
+
+/* closest points of segments a0-a1 and b0-b1 (Ericson 5.1.9): squared distance, the parameters in sa / sb */
+static float seg_seg(const float *a0, const float *a1, const float *b0, const float *b1, float *sa, float *sb)
+{
+    float d1[3], d2[3], r[3], s = 0, t = 0;
+    for (int k = 0; k < 3; k++) { d1[k] = a1[k] - a0[k]; d2[k] = b1[k] - b0[k]; r[k] = a0[k] - b0[k]; }
+    float a = dot3(d1, d1), e = dot3(d2, d2), f = dot3(d2, r);
+    if (a < 1e-6f && e < 1e-6f) s = t = 0;
+    else if (a < 1e-6f) { s = 0; t = clamp01(f / e); }
+    else {
+        float c = dot3(d1, r);
+        if (e < 1e-6f) { t = 0; s = clamp01(-c / a); }
+        else {
+            float b = dot3(d1, d2), den = a * e - b * b;
+            s = den > 1e-6f ? clamp01((b * f - c * e) / den) : 0;
+            t = (b * s + f) / e;
+            if (t < 0) { t = 0; s = clamp01(-c / a); } else if (t > 1) { t = 1; s = clamp01((b - c) / a); }
+        }
+    }
+    float d = 0;
+    for (int k = 0; k < 3; k++) { float x = a0[k] + d1[k] * s - b0[k] - d2[k] * t; d += x * x; }
+    *sa = s; *sb = t;
+    return d;
+}
+
+struct ms_carrier;
+static void fx_at(uint8_t *p, uint32_t k, uint32_t n, const float *t, const float *rot, struct ms_carrier *c);
+static void fx_stop(struct ms_carrier *c, const char *why);
+static void shot_dir_deg(const struct ms_state *s, float r[3]);
+
+/* test 22 diagnostic, on a miss: the closest pass to a tested hurt volume, then every monster in the manager with
+ * em_ok's gates (spawned +0xb5f9, active +0x7652 == 1, small +0xb5f7, record +0x1a0 / +0x444, HP +0x370), its area
+ * (+0x1054) and how far its origin is from the shot's line (cm off the line, cm along it) */
+static void shot_miss_log(struct ms_state *s)
+{
+    if (s->shot_near < 1e29f)
+        logf("msport: marker shot: closest pass %d cm from a hurt volume of monster %x joint %u at tick %d",
+             (int)s->shot_near, (uint32_t)(uintptr_t)s->shot_near_m, s->shot_near_j, (int)s->shot_near_t);
+    else logf("msport: marker shot: no hurt volume tested (no monster passed em_ok)");
+    void *mgr = MS_EM_MGR;
+    float n = root(dot3(s->shot_v, s->shot_v)), u[3];
+    if (n < 1e-3f) return;
+    for (int k = 0; k < 3; k++) u[k] = s->shot_v[k] / n;
+    for (int i = 0; mgr && i < 10; i++) {
+        uint8_t *m = MS_EM_GET(mgr, i), *r = m ? em_rec(m) : 0;
+        if (!m || !r) continue;
+        float w[3] = {FIELD(float, r, 0x40) - s->shot_o[0], FIELD(float, r, 0x44) - s->shot_o[1],
+                      FIELD(float, r, 0x48) - s->shot_o[2]}, along = dot3(w, u), off = root(dot3(w, w) - along * along);
+        logf("msport: marker shot: monster %u %x em %u ok %d (spawned %u active %u small %u rec %u/%u hp %d area %u)"
+             " origin %d cm off the line at %d cm", i, (uint32_t)(uintptr_t)m, FIELD(uint8_t, m, 0xb5f4), em_ok(m),
+             FIELD(uint8_t, m, 0xb5f9), FIELD(uint8_t, m, 0x7652), FIELD(uint8_t, m, 0xb5f7), FIELD(uint8_t, r, 0x1a0),
+             FIELD(uint8_t, r, 0x444), FIELD(int32_t, r, 0x370), FIELD(uint8_t, m, 0x1054), (int)off, (int)along);
+    }
+}
+
+/* one step of the shot from s->shot_p over tk ticks: 1 = it hit (marker placed), -1 = it ended, 0 = flying */
+static int shot_step(uint8_t *p, struct ms_state *s, float tk)
+{
+    float a0[3], a1[3];
+    for (int k = 0; k < 3; k++) { a0[k] = s->shot_p[k]; a1[k] = a0[k] + s->shot_v[k] * tk; }
+    void *mgr = MS_EM_MGR;
+    float best = 1e30f, hit[3] = {0, 0, 0};
+    uint8_t *bm = 0; uint16_t bj = 0;
+    for (int i = 0; mgr && i < 10; i++) {
+        uint8_t *m = MS_EM_GET(mgr, i);
+        if (!em_ok(m)) continue;
+        const int16_t *r = MS_BODYDATA(m);
+        for (int n = 0; r && r[0] != -1 && n < 256; n++, r += 22) {
+            uint16_t fl = (uint16_t)r[5];
+            if (fl & 0x100) continue;                   /* push only */
+            struct shape_in in = {r[0], r[1], r[2], (uint16_t)((fl >> 12) & 1), *(const float *)(r + 8), 0,
+                                  {*(const float *)(r + 10), *(const float *)(r + 12), *(const float *)(r + 14), 0},
+                                  {*(const float *)(r + 16), *(const float *)(r + 18), *(const float *)(r + 20), 0},
+                                  1, {0, 0, 0}, 1.0f};
+            float out[12] = {0};
+            int ty = MS_SHAPE((fl & 0x1fff) >> 12, m, &in, out);
+            if (!ty) continue;
+            const float *c1 = ty == 1 ? out : out + 4;
+            float sa, sb, d = seg_seg(a0, a1, out, c1, &sa, &sb), rr = out[8] + SHOT_R;
+            if (d > rr * rr) {                          /* diag: the closest pass (gap between the shot's sphere
+                                                           and the volume's surface) */
+                float gap = root(d) - rr;
+                if (gap < s->shot_near) {
+                    s->shot_near = gap; s->shot_near_m = m; s->shot_near_t = s->shot_t + sa * tk;
+                    s->shot_near_j = (uint16_t)(ty != 1 && sb > 0.5f && r[1] != -1 ? r[1] : r[0]);
+                }
+                continue;
+            }
+            if (sa >= best) continue;
+            best = sa; bm = m;
+            bj = (uint16_t)(ty != 1 && sb > 0.5f && r[1] != -1 ? r[1] : r[0]);
+            float ax[3], sp[3], n3[3], nl;                     /* the volume's surface toward the shot */
+            for (int k = 0; k < 3; k++) {
+                ax[k] = out[k] + (c1[k] - out[k]) * sb; sp[k] = a0[k] + (a1[k] - a0[k]) * sa; n3[k] = sp[k] - ax[k];
+            }
+            nl = root(dot3(n3, n3));
+            for (int k = 0; k < 3; k++) hit[k] = nl > 1 ? ax[k] + n3[k] / nl * out[8] : sp[k];
+        }
+    }
+    if (bm) {
+        const float *m = joint_mat(bm, bj);
+        s->mk_mon = bm; s->mk_t = MARKER_TIME;
+        s->mk_joint = m ? bj : 0xffff;
+        if (m)                                          /* world -> the joint's frame (orthogonal axes, scaled) */
+            for (int k = 0; k < 3; k++) {
+                const float *ax = m + 4 * k;
+                float w[3] = {hit[0] - m[12], hit[1] - m[13], hit[2] - m[14]}, l2 = dot3(ax, ax);
+                s->mk_local[k] = l2 > 1e-9f ? dot3(w, ax) / l2 : 0;
+            }
+        if (MS_FXQ_ON) { float t[3]; fx_stop(&s->mk_c, "new marker"); if (marker(s, t)) fx_at(p, MS_FXQ_MARKER, t, 0, &s->mk_c); }
+        float *q = pos_of(p);
+        logf("msport: marker shot hit monster %x (em %u) joint %u at %d %d %d, %d cm away, after %d ticks",
+             (uint32_t)(uintptr_t)bm, FIELD(uint8_t, bm, 0xb5f4), bj, (int)hit[0], (int)hit[1], (int)hit[2],
+             (int)root(sq(hit[0] - q[0]) + sq(hit[1] - q[1]) + sq(hit[2] - q[2])), (int)s->shot_t);
+        return 1;
+    }
+    for (int k = 0; k < 3; k++) s->shot_p[k] = a1[k];
+    s->shot_t += tk;
+    if (s->shot_t >= SHOT_LIFE || s->shot_p[1] < MS_GROUND_Y(p) - 300.0f) {
+        logf("msport: marker shot missed (%d ticks, %d cm, %s)", (int)s->shot_t, (int)(s->shot_t * SHOT_SPEED),
+             s->shot_t >= SHOT_LIFE ? "life over" : "300 cm under the ground");
+        shot_miss_log(s);
+        return -1;
+    }
+    return 0;
+}
+
+static void marker_shot(uint8_t *p, struct ms_state *s)
+{
+    ms_sound_post(p, 4, 512 + 9);  /* Frontier's explicit shot call, separate from its motion cues. */
+    const float *h = joint_mat(p, SHOT_HAND), *q = pos_of(p);
+    float y = FIELD(uint16_t, p, 0xfec) * MS_U16_RAD, c = cosf_gu(y), sn = sinf_gu(y);
+    const float o[3] = {22.0f * c, 20.0f, -22.0f * sn};   /* R(yaw) (22, 0, 0) + 20 up */
+    for (int k = 0; k < 3; k++) {
+        s->shot_p[k] = (h ? h[12 + k] : q[k] + (k == 1 ? 150.0f : 0)) + o[k];
+        s->shot_v[k] = s->aim_dir[k] * SHOT_SPEED;
+    }
+    if (s->shot_on) {
+        logf("msport: marker shot replaced in flight (%d ticks)", (int)s->shot_t);
+        shot_miss_log(s);
+    }
+    s->shot_t = 0; s->shot_on = 1; s->trail_k = 0; s->shot_near = 1e30f; s->shot_near_m = 0;
+    for (int k = 0; k < 3; k++) s->shot_o[k] = s->shot_p[k];
+    if (MS_FXQ_ON) { float r[3]; shot_dir_deg(s, r); fx_stop(&s->shot_c, "new shot"); fx_at(p, MS_FXQ_SHOT, s->shot_p, r, &s->shot_c); }
+    logf("msport: marker shot from %d %d %d (hand %s), direction %d %d %d / 1000", (int)s->shot_p[0],
+         (int)s->shot_p[1], (int)s->shot_p[2], h ? "joint 12" : "missing", (int)(s->aim_dir[0] * 1000),
+         (int)(s->aim_dir[1] * 1000), (int)(s->aim_dir[2] * 1000));
+    uint8_t *cm = MS_CAM_MGR, *cam = cm ? FIELD(uint8_t *, cm, 0x54) : 0;
+    if (cam) {                                          /* diag: the camera now (the shot took its direction at the
+                                                           action start), the hunter's yaw, the aim view */
+        float d[3];
+        for (int k = 0; k < 3; k++) d[k] = FIELD(float, cam, 0x60 + 4 * k) - FIELD(float, cam, 0x40 + 4 * k);
+        float dn = root(dot3(d, d));
+        if (dn > 1)
+            logf("msport: marker shot: camera now %d %d %d / 1000, hunter yaw %d deg, aim view %u, scope byte %u",
+                 (int)(d[0] / dn * 1000), (int)(d[1] / dn * 1000), (int)(d[2] / dn * 1000),
+                 (int)(FIELD(uint16_t, p, 0xfec) * (360.0f / 65536.0f)), s->aim_view, MS_AIM_BYTE(p));
+    }
+}
+
+/* ------------------------------------------------------------------------------------------------ gauge, inputs */
+
+static void gauge_add(struct ms_state *s, int32_t n)
+{
+    int32_t old = s->gauge / BAR;
+    s->gauge += n;
+    if (s->gauge < 0) s->gauge = 0;
+    if (s->gauge > GAUGE_MAX) s->gauge = GAUGE_MAX;
+    static int s_n;
+    if (s->gauge / BAR != old && s_n++ < 300) logf("msport: magnet gauge %d bars (%d)", s->gauge / BAR, s->gauge);
+}
+
+static int cond(uint8_t *p, struct ms_state *s, uint32_t c)   /* MHF cancel conditions (mechanics.md 2) */
+{
+    float d;
+    switch (c) {
+    case 0: return 1;
+    case 1: case 2: case 3: case 4: case 5: return MS_STAMINA_NOW(p) >= 1 && s->gauge >= (int32_t)c * BAR;
+    case 6: return (s->flags & 8) != 0;                 /* guarded during 112's window */
+    case 7: return !s->pin_mon;
+    case 8: return s->gc_hits >= 1;
+    case 9: return pos_of(p)[1] - MS_GROUND_Y(p) >= FALL_HEIGHT;
+    case 10: d = marker_dist(p, s); return MS_STAMINA_NOW(p) >= 1 && s->gauge >= BAR && d > 1400 && d < 4000;
+    case 11: d = marker_dist(p, s); return MS_STAMINA_NOW(p) >= 1 && s->gauge >= BAR && d > 0 && d < 1400;
+    case 12: return (s->flags & 0x20000) != 0;
+    case 13: return s->mag[s->mode] == 0 && s->mag_v[s->mode] >= MAG_READY;
+    }
+    return 0;
+}
+
+static int input(struct ms_state *s, uint32_t inp, uint32_t held, uint32_t trig, uint32_t combo, uint32_t r)
+{
+    int rh = (held & r) != 0, aim = (s->flags & 1) != 0;
+    switch (inp) {
+    case 0: return (trig & PAD_D) && MS_STAMINA_NOW(s->p) >= 150;   /* MHF's evade key + 75 stamina (GU 150): only
+                                                           the approach cancels 63 / 69 use it (msbuild APPROACH) */
+                                                        /* R1 is a modifier: tri / circle alone not with R (test 4:
+                                                           R + Y while walking did the walk's Y) */
+    /* test 8: aim + Y without a marker did the plain Y: MHF's "aim:" inputs mask the plain ones while aiming */
+    /* test 15 (Guard Counter, then Y + B -> 154 from f68): B, then Y 8 ms later = GU combo 0x42, tri and the chord;
+       tri's pri 20 (-> 16, f46-f76) beat the chord's 0 and the maintainer never got 154. MHF reads tri+circle as
+       its own key action (0xe1 / 0xdc, 0x10336c70, C) and its tables give tri the higher priority in the chord's
+       go window, so a chord press must not count as tri / circle (S: the key layer 0x108f7010 not traced) */
+    case 2: return !rh && !aim && (combo & 2) && !(combo & 0x40);   /* tri (22 = stick + tri: cmd_type 0xc adds the
+                                                           stick) */
+    case 3: return !rh && !aim && (combo & 4) && !(combo & 0x40);   /* circle (6 = stick + circle) */
+    case 4: return !rh && !aim && (combo & 0x40);       /* tri + circle */
+    case 5: return (trig & BTN_MINUS) != 0;
+    case 7: return rh && (combo & 2) && !(combo & 0x40);
+    case 8: return rh && (combo & 4) && !(combo & 0x40);
+    case 9: return rh && (combo & 0x40);
+    case 10: return rh && (trig & PAD_D);               /* R1 + special(A) */
+    case 11: return rh && (trig & BTN_MINUS);
+    case 13: return (rh && (trig & BTN_ZR)) || ((held & BTN_ZR) && (trig & r));     /* R + ZR, either order */
+    case 14: return (held & PAD_R) != 0;
+    case 15: return !(held & PAD_R);                    /* circle not held (a level) */
+    case 16: return (trig & r) != 0;
+    case 17: return rh && (trig & PAD_L);               /* R1 + evade (the MS evade key: left) */
+    case 19: return aim && (combo & 4);
+    case 20: return 1;
+    case 21: return !(held & PAD_U);
+    case 23: return aim && (trig & PAD_D);           /* test 13: was the left button: aim + A rolled */
+    case 24: return aim && (combo & 2);
+    }
+    return 0;                                           /* 0 / 1: GU's common evade / move commands; 12 / 18 never */
+}
+
+static void arm(uint8_t *p, struct ms_state *s, uint32_t hit);
+static void hit_check(uint8_t *p, uint32_t hit, int late);
+static void slot_trace(uint8_t *p, struct ms_state *s);
+static void elem_fix(uint8_t *p);
+
+/* Magnetic Shock 5 x 3 (MHF task kind 0x0f, 0x1004d810): special #12 at task ticks 3 / 5 / 7 / 10 on spots 170 ->
+ * 550 cm ahead (msbuild SHOCK; worldhits.c keeps each spawned hit fixed). GU's ground-impact fallback
+ * is used only when converted MHF effect posts are disabled. */
+static const float s_shock_at[MS_NSHOCK] = {3, 5, 7, 10};
+
+static void shock_tick(uint8_t *p, struct ms_state *s, float tk)
+{
+    if (!s->shock_on) return;
+    s->shock_t += tk;
+    while (s->shock_k < MS_NSHOCK && s->shock_t >= s_shock_at[s->shock_k]) {
+        arm(p, s, MS_HIT_SHOCK + s->shock_k);
+        if (!MS_NFXPOSTS) MS_EFFECT(p, MS_EFX_SHOCK + s->shock_k);   /* GS's stand-in; MHF's spots: fx_posts */
+        s->shock_k++;
+    }
+    if (s->shock_k >= MS_NSHOCK) s->shock_on = 0;
+}
+
+/* the marker's and Magnetise's GS stand-in looks, used only with the MHF effects off (MS_FXQ_ON 0; with them: fc5:e
+ * on the marker, magz_look): GS charge flashes (msfx MARKER_EFX / AURA_EFX, no sound tied) every MARKER_BLINK /
+ * AURA_EVERY ticks, the marker's at its point through a
+ * world-position request (em089_efx.c), Magnetise's on the weapon hand */
+#define MARKER_BLINK 60.0f
+#define AURA_EVERY 45.0f
+
+static void fxw_add(void *h, uint32_t id);
+static void *post_n_w(uint8_t *p, uint32_t id, uint32_t n);
+
+static void *post_at(uint8_t *p, uint32_t id, const float *t, const float *rot_deg)   /* a PEL id at a world point */
+{
+    uint32_t buf[0x100 / 4 + 4];
+    void *req = (void *)(((uint32_t)buf + 15u) & ~15u);
+    MS_REQ_CTOR(req);
+    FIELD(uint32_t, req, 0x1c) |= 1u;
+    for (int i = 0; i < 3; i++) FIELD(float, req, 0xc0 + 4 * i) = t[i];
+    FIELD(float, req, 0xcc) = 0.0f;
+    FIELD(uint32_t, req, 0x14) |= 0x80000u;             /* test 8: still unseen. The ground word (req+0x6c, field 19):
+                                                           an effect keeps only elements whose word meets (2 << kind)
+                                                           | 1, so 0 drew nothing; em089_efx.c's posts give 3 */
+    FIELD(uint32_t, req, 0x6c) = 3u;
+    FIELD(void *, req, 0x4) = p;                        /* test 6: handles but no blink. em089_efx.c's world posts set */
+    FIELD(uint8_t, req, 0xc) = FIELD(uint8_t, p, 0x2550 + 0xc);  /* the owner and its area: the area of the hunter's
+                                                           own request (+0x2550, the guard flash's, which shows) */
+    if (rot_deg) {                                      /* em089_efx.c post_full: req+0x14 bit 1, degrees at +0x30 */
+        FIELD(uint32_t, req, 0x14) |= 2u;
+        for (int i = 0; i < 3; i++) FIELD(float, req, 0x30 + 4 * i) = rot_deg[i];
+        FIELD(float, req, 0x3c) = 0.0f;
+    }
+    void *h = ms_post(p, id, req);
+    MS_REQ_DTOR(req);
+    fxw_add(h, id);
+    return h;
+}
+
+static void *flash_at(uint8_t *p, const float *t) { return post_at(p, MS_EFX_MARKER, t, 0); }   /* GS's stand-in */
+
+/* GU's post handle (C, ms_act.c "Effect build diagnostic"): a uMHProofEffect proxy (vtable MAIN 0x1731578), its PEL
+ * record = *(*(proxy+0x34 + proxy+0x40 x 0x14 + 0x74) + proxy+0x44 x 4), u16 +0x50 = the PEL id; unit state +0xc & 7
+ * (0 not yet run, 1 / 2 alive), byte +0x30 = 2 once killed. fx_mine: the handle is still the proxy we posted for
+ * `id` (the manager frees ended proxies and reuses their memory: tests 18-21 logged one handle for two posts) */
+#define FXW_PROXY_VT 0x1731578u
+#define FXW_EFF_VT 0x17317dcu
+static int fxw_ok(uint32_t v) { return v >= MS_HEAP_POINTER_MIN && v < MS_HEAP_POINTER_END && !(v & 3); }
+static int fx_mine(void *hp, uint32_t id)
+{
+    uint32_t h = (uint32_t)(uintptr_t)hp, pel, list, idx, recs;
+    if (!fxw_ok(h) || FIELD(uint32_t, h, 0) != MAIN(FXW_PROXY_VT)) return 0;
+    if (!fxw_ok(pel = FIELD(uint32_t, h, 0x34)) || (list = FIELD(uint32_t, h, 0x40)) > 2) return 0;
+    if ((idx = FIELD(uint32_t, h, 0x44)) >= FIELD(uint32_t, pel + list * 0x14, 0x68)) return 0;
+    if (!fxw_ok(recs = FIELD(uint32_t, pel + list * 0x14, 0x74)) || !fxw_ok(FIELD(uint32_t, recs, idx * 4))) return 0;
+    uint32_t st = FIELD(uint32_t, h, 0xc) & 7;
+    return FIELD(uint16_t, FIELD(uint32_t, recs, idx * 4), 0x50) == id && st < 3 && FIELD(uint8_t, h, 0x30) < 2;
+}
+
+/* MHF effects carried by a moving thing (msfxposts.EVENT_POSTS 'MARKER' / 'SHOT' / 'TRAIL' / 'ATT_*' / 'REP_*' =
+ * ms_fxq rows k..k+n): every record posted at the point (kept in c when given). S: one point for all records (their
+ * MHF base offsets are 0). Logged: the first post of each carrier set and its first handle */
+static void fx_at(uint8_t *p, uint32_t k, uint32_t n, const float *t, const float *rot, struct ms_carrier *c)
+{
+    int j = 0;
+    void *first = 0;
+    for (uint32_t i = 0; i < n; i++)
+        for (uint32_t r = 0; r < ms_fxq[k + i].n; r++) {
+            void *x = post_at(p, ms_fxq[k + i].id + r, t, rot);
+            if (!first) first = x;
+            if (c && j < MS_FXH) { c->h[j] = x; c->id[j] = (uint16_t)(ms_fxq[k + i].id + r); j++; }
+        }
+    if (c) { for (int i = 0; i < 3; i++) c->at[i] = t[i]; c->age = 0; }
+    static uint64_t s_seen;                             /* test 21: a 32-bit mask folded 32 / 34 onto 0 / 2, so the
+                                                           attraction's beam and rail posts were never logged */
+    if (k < 64 && !(s_seen & (1ull << k))) {
+        s_seen |= 1ull << k;
+        logf("msport: mhf carrier %u (%u rows, PEL %u) at %d %d %d: %x", k, n, n ? ms_fxq[k].id : 0, (int)t[0],
+             (int)t[1], (int)t[2], (uint32_t)(uintptr_t)first);
+    }
+}
+
+/* kill (0x32a400 mode 1 -> vt+0xa4 0x32a258: its effects' vt+0x40, state 2): mode 0 only ends the emission, and the
+ * marker / shot particles live 631-848 s (test 16: spheres left behind, through area changes). Only our own live
+ * proxies (fx_mine) */
+static void fx_stop(struct ms_carrier *c, const char *why)
+{
+    static int s_n;
+    if (c->h[0] && s_n++ < 12)
+        logf("msport: mhf carrier PEL %u stopped (%s) after %d ticks, alive %d", c->id[0], why, (int)c->age,
+             fx_mine(c->h[0], c->id[0]));
+    for (int j = 0; j < MS_FXH; j++) { if (c->h[j] && fx_mine(c->h[j], c->id[j])) MS_EFX_STOP(c->h[j], 1); c->h[j] = 0; }
+}
+
+/* a carrier follows its point: posted once, then moved there every update (0x32a45c writes the position of the
+ * proxy's effects +0x150 / +0x154, +0x40: GU's own beams move this way, em089_efx.c); re-posted only when its effect
+ * ended or the point moved more than `repost` cm from where it was posted (world-space particles stay where they were
+ * emitted: test 16). Tests 17-21 killed and re-posted it every tick: the proxy creates its effect only in its own
+ * start step (0x329908, after the post) and the effect builds on its first update (0x43ff4 -> 0x9bda64), so the next
+ * tick's kill came before any particle was drawn (S: the marker and the shot were never seen in tests 17-21, while
+ * test 16's moved version showed) */
+static void fx_follow(uint8_t *p, uint32_t k, uint32_t n, const float *t, const float *rot, struct ms_carrier *c,
+                      float repost, float tk)
+{
+    c->age += tk;
+    if (c->h[0] && fx_mine(c->h[0], c->id[0]) &&
+        sq(t[0] - c->at[0]) + sq(t[1] - c->at[1]) + sq(t[2] - c->at[2]) < repost * repost) {
+        for (int j = 0; j < MS_FXH; j++) if (c->h[j] && fx_mine(c->h[j], c->id[j])) MS_EFX_SET_POS(c->h[j], t, 0);
+        return;
+    }
+    if (c->h[0]) fx_stop(c, fx_mine(c->h[0], c->id[0]) ? "moved: re-posted" : "ended by itself: re-posted");
+    fx_at(p, k, n, t, rot, c);
+}
+
+static void dir_deg(const float *v, float r[3])  /* S: (pitch, yaw, 0) of a direction, GU's beam order */
+{
+    r[0] = -atan2f_gu(v[1], root(v[0] * v[0] + v[2] * v[2])) * 57.29578f;
+    r[1] = atan2f_gu(v[0], v[2]) * 57.29578f;
+    r[2] = 0.0f;
+}
+
+static void shot_dir_deg(const struct ms_state *s, float r[3]) { dir_deg(s->shot_v, r); }
+
+static void fx_row(uint8_t *p, int k, int n, int i)  /* one row (PEL records on its joint) of an ms_fxq set */
+{
+    if (i < n) post_n_w(p, ms_fxq[k + i].id, ms_fxq[k + i].n);
+}
+
+/* Magnetise's look (MHF MS task 0xd / 0xe, 0x1004e3ab / 0x1004e59b / 0x1004e617, C; msfxposts 'MAGZ_*'): the flash at
+ * tick 18 (Cutting) / 17 (Impact), then a spot every 10 ticks (5 in turn) and a pulse every 20 while Magnetise is on
+ * in the task's mode, the weapon drawn and that mode current; the task ends with Magnetise */
+static void magz_look(uint8_t *p, struct ms_state *s, float tk)
+{
+    if (!s->mz_on) return;
+    int m = s->mz_mode;
+    if (s->mag[m] != 1) { s->mz_on = 0; return; }
+    float t0 = m ? 17.0f : 18.0f, t = s->mz_t;
+    s->mz_t += tk;
+    if (t < t0 && s->mz_t >= t0) {
+        if (m) fx_row(p, MS_FXQ_MAGZ_I, 0); else fx_row(p, MS_FXQ_MAGZ_C, 0);
+        s->mz_spot = 10; s->mz_pulse = 20;
+        logf("msport: Magnetise look on (%s)", m ? "Impact" : "Cutting");
+    }
+    if (s->mz_t < t0 || !ms_drawn(p) || s->mode != m) return;
+    if ((s->mz_spot -= tk) <= 0) {
+        s->mz_spot += 10;
+        if (m) fx_row(p, MS_FXQ_MAGZ_SPOT_I, s->mz_k % 5); else fx_row(p, MS_FXQ_MAGZ_SPOT_C, s->mz_k % 5);
+        s->mz_k++;
+    }
+    if ((s->mz_pulse -= tk) <= 0) {
+        s->mz_pulse += 20;
+        if (m) fx_row(p, MS_FXQ_MAGZ_PULSE_I, 0); else fx_row(p, MS_FXQ_MAGZ_PULSE_C, 0);
+    }
+}
+
+/* the attraction's carriers (msfxposts 'ATT_*', C for the moments, S for following): the rail = fc5 0 on the hunter ->
+ * marker line, a point every 2 ticks from tick 8 (motion f24) at 300 + 220 n while the budget > 500 (MS task kind 9,
+ * 0x1004dcfb); the beam fc5 2 from the hand toward the marker from tick 11 (f30), re-posted every 8 ticks (its
+ * particles live 16 frames; MHF keeps the carrier aimed, 0x101ea2a0; its length scale d / 4000 not ported) */
+static void att_carriers(uint8_t *p, struct ms_state *s, float tk)
+{
+    float t[3], *q = pos_of(p);
+    if (!MS_FXQ_ON || s->att < 1 || s->att > 2 || !marker(s, t)) return;
+    float d[3] = {t[0] - q[0], t[1] - q[1], t[2] - q[2]}, n = root(dot3(d, d));
+    if (n < 1) return;
+    for (int k = 0; k < 3; k++) d[k] /= n;
+    s->att_all += tk;
+    if (!s->att_mark && s->att_all >= 1.0f) {           /* fc5 7 at the marker (f10 of 1069 / 1079 / 1414 / 1415 /
+                                                           1460 / 1472, 0x10335782; 58 starts 1472 at f8: 1 tick, S
+                                                           for the other attractions' start frames) */
+        s->att_mark = 1;
+        fx_at(p, MS_FXQ_ATT_MARK, t, 0, 0);
+    }
+    if (s->att_all >= 8 && (s->rail_t -= tk) <= 0 && s->att_b > 500) {
+        s->rail_t += 2;
+        float r = 300 + 220 * s->rail_n;
+        if (r < n - 300) {
+            float x[3] = {q[0] + d[0] * r, q[1] + d[1] * r, q[2] + d[2] * r}, rot[3];
+            dir_deg(d, rot);
+            fx_at(p, MS_FXQ_ATT_RAIL, x, rot, 0);
+            s->rail_n++;
+        }
+    }
+    if (s->att_all >= 11 && (s->beam_t -= tk) <= 0) {
+        s->beam_t += 8;
+        const float *h = joint_mat(p, 8);
+        float x[3], rot[3];
+        for (int k = 0; k < 3; k++) x[k] = h ? h[12 + k] : q[k];
+        float b[3] = {t[0] - x[0], t[1] - x[1], t[2] - x[2]};
+        dir_deg(b, rot);
+        fx_at(p, MS_FXQ_ATT_BEAM, x, rot, 0);
+    }
+}
+
+/* the repulsion's t2 posts (MS task 0xb / 0xc, C): fc5 0x4d at the marker, the carrier fc5 0x4e at the hunter + 150 up
+ * + 100 / 200 / 300 toward the marker (d <= 500 / <= 1000 / more; its scale bands 0.8 / 1 / 1.3 not ported) */
+static void rep_posts(uint8_t *p, struct ms_state *s, float tk)
+{
+    float t[3], *q = pos_of(p);
+    if (s->rep_t <= 0 || (s->rep_t -= tk) > 0 || !MS_FXQ_ON || !marker(s, t)) return;
+    float d[3] = {t[0] - q[0], t[1] - (q[1] + 150), t[2] - q[2]}, n = root(dot3(d, d));
+    if (n < 1) return;
+    float r = n <= 500 ? 100 : n <= 1000 ? 200 : 300, x[3], rot[3];
+    for (int k = 0; k < 3; k++) x[k] = q[k] + d[k] / n * r;
+    x[1] += 150;
+    dir_deg(d, rot);
+    fx_at(p, MS_FXQ_REP_MARK, t, 0, 0);
+    fx_at(p, MS_FXQ_REP_CARRIER, x, rot, 0);
+}
+
+/* the aim view: MHF's aim camera 0x1033a880 (over the shoulder, free look; on in idle / walk / runs, off in the pin
+ * actions) and reticle 0x10339700 (sprite 0xb6 at the screen centre) -> GU's gunner aim view (ms.h MS_AIM_BYTE): the
+ * quest camera's aim mode 0 (GU's over-the-shoulder offsets) with MHF's look (aim_look), MHF's reticle frames repel
+ * blue / attract red / neither white on GU's scope HUD (ms_reticle; deviation: MHF's preset offset). Local hunter
+ * only, as MHF (0x1033a270). GU's 0x29fb8c clears the byte at the end of every update (ms.h): ms_after_update (slot
+ * 45, right after it) sets it again, so the camera and the scope HUD read 1 */
+static int aim_want(uint8_t *p, struct ms_state *s)
+{
+    return (s->flags & 1) && !(s->flags & 0x10) && MS_IS_LOCAL(p);
+}
+
+static uint8_t *quest_cam(void)                       /* the quest camera (0x1baa4's DTI walk), else 0 */
+{
+    uint8_t *cm = MS_CAM_MGR, *cam = cm ? FIELD(uint8_t *, cm, 0x54) : 0;
+    if (!cam) return 0;
+    uint8_t *d = ((uint8_t *(*)(void *))MS_VT(cam, 0x14))(cam);
+    uint32_t id = FIELD(uint32_t, MAIN(MS_DTI_QCAM), 4);
+    for (; d; d = FIELD(uint8_t *, d, 0x10)) if (FIELD(uint32_t, d, 4) == id) return cam;
+    return 0;
+}
+
+#define AIM_YAW_STEP 576.0f                             /* MHF 0x1033a880 (C): 0x240 per tick on the camera's yaw */
+#define AIM_PITCH_STEP 352.0f                           /* 0x160 per tick on its pitch */
+#define AIM_PITCH_MAX 3356.0f                           /* MHF clamps -0x12e4..+0xd1c (camera setting 0); the sign of
+                                                           MHF's pitch against GU's is not traced (G): +-0xd1c, the
+                                                           smaller side, holds in both senses */
+
+/* MHF's look (0x1033a880, C): each tick the camera controls (commands 0x20 / 0x21 / 0x22 / 0x23 held, digital: no
+ * tilt scaling) step the camera's yaw by 0x240 and its pitch by 0x160 (MHF's invert options 0x1082f610 / 0x1082f660),
+ * the pitch clamped; the hunter's body does not turn (the camera's own fields; the shot's start turns him, case 82 /
+ * 84 in ms_act). Port: GU's right stick through GU's own aim reader 0x27d5c4 (source 2), with GU's invert options,
+ * at MHF's steps per MHF tick (tick_len).
+ * Source 1 reads +0x140c/+0x1410 (the movement stick); source 2 reads
+ * +0x140e/+0x1412 and the right-stick direction bits at +0x13fc. */
+static void aim_look(uint8_t *p, struct ms_state *s)
+{
+    uint32_t d = 0;
+    int16_t mag = 0;
+    if (MS_AIM_DIRS(p, 2, &d, &mag) != 1) d = 0;
+    uint8_t *o = MS_OPT_OBJ;
+    if (o) {
+        uint8_t inv = FIELD(uint8_t, o, 0x66);
+        if ((inv | 2) == 3) d = (d & ~3u) | (d & 1) << 1 | (d & 2) >> 1;
+        if ((inv & 0xfe) == 2) d = (d & ~12u) | (d & 4) << 1 | (d & 8) >> 1;
+    }
+    float tk = tick_len(p);
+    int dy = !!(d & 4) - !!(d & 8), dp = (d & 1) ? 1 : (d & 2) ? -1 : 0;
+    s->aim_yaw += dy * AIM_YAW_STEP * tk;
+    while (s->aim_yaw >= 65536.0f) s->aim_yaw -= 65536.0f;
+    while (s->aim_yaw < 0) s->aim_yaw += 65536.0f;
+    s->aim_pitch += dp * AIM_PITCH_STEP * tk;
+    if (s->aim_pitch > AIM_PITCH_MAX) s->aim_pitch = AIM_PITCH_MAX;
+    if (s->aim_pitch < -AIM_PITCH_MAX) s->aim_pitch = -AIM_PITCH_MAX;
+}
+
+static void aim_view(uint8_t *p, struct ms_state *s)
+{
+    if (aim_want(p, s)) {
+        uint8_t *cm = MS_CAM_MGR, *cam = quest_cam();
+        if (!s->aim_view) {
+            int mode = MS_AIM_MODE(p);
+            float y = FIELD(uint16_t, p, 0xfec);        /* MHF keeps the camera's yaw: the view's yaw, else the hunter's */
+            if (cam) {
+                float dx = FIELD(float, cam, 0x60) - FIELD(float, cam, 0x40), dz = FIELD(float, cam, 0x68) -
+                    FIELD(float, cam, 0x48);
+                if (dx * dx + dz * dz > 1) y = (float)yaw_to(dx, dz);
+            }
+            s->aim_yaw = y;
+            s->aim_pitch = 0;                           /* deviation: MHF starts from the camera's pitch (0x1033a750);
+                                                           GU's pitch sense against the view is not traced: level */
+            MS_AIM_BYTE(p) = 1;
+            MS_AIM_PITCH(p) = 0;
+            if (cm) MS_CAM_AIM(cm, mode);
+            s->aim_log = 10;
+            static int s_n;
+            if (s_n++ < 10) logf("msport: aim view on (camera mode %d, manager %x, quest camera %x, yaw %d deg)", mode,
+                                 (uint32_t)(uintptr_t)cm, (uint32_t)(uintptr_t)cam, (int)(y * (360.0f / 65536.0f)));
+        } else if (s->aim_log) {                        /* before 0x29fb8c: what the last update left (test 22) */
+            s->aim_log--;
+            logf("msport: aim tick: byte %u cam aim %u mode %u settled %u yaw %d deg pitch %d deg (+0x2714 %d)",
+                 MS_AIM_BYTE(p), cam ? FIELD(uint8_t, cam, 0xacc) : 0xff, cam ? FIELD(uint8_t, cam, 0xac8) : 0xff,
+                 cam ? FIELD(uint8_t, cam, 0xa60) : 0xff, (int)(s->aim_yaw * (360.0f / 65536.0f)),
+                 (int)(s->aim_pitch * (360.0f / 65536.0f)), MS_AIM_PITCH(p));
+        }
+        {                                               /* MHF's reticle frame (0x10339700, C): 0 repel possible =
+                                                           marker 0 < d < 1400, 1 attract possible = 1400 < d < 4000,
+                                                           else 2 (3-D d to the marker), shown on GU's scope HUD
+                                                           (ms_class.c ms_reticle). MHF also asks 0x10331c10 (C,
+                                                           mechanics.md "MHF's target test"): every refusal there
+                                                           needs a monster state with no traced GU field, so the
+                                                           port, as cond 10 / 11, never refuses (deviation) */
+            float dm = marker_dist(p, s);
+            int fr = dm > 0 && dm < 1400.0f ? 0 : dm > 1400.0f && dm < 4000.0f ? 1 : 2;
+            ms_reticle(fr);
+            static int s_fr = -1, s_frn;
+            if ((fr != s_fr || !s->aim_view) && s_frn++ < 40)
+                logf("msport: aim reticle frame %d (%s), marker %d cm", fr, fr == 0 ? "repel possible, blue" :
+                     fr == 1 ? "attract possible, red" : "neither, white", (int)dm);
+            s_fr = fr;
+        }
+        MS_AIM_BYTE(p) = 1;
+        s->aim_view = 1;
+    } else if (s->aim_view) {
+        MS_AIM_BYTE(p) = 0;                             /* the camera's 0x23ebc then ends its aim */
+        s->aim_view = 0;
+        ms_reticle(-1);                                 /* the scope HUD's HD_hud01 back */
+    }
+}
+
+/* slot 45 (+0xb4): GU's 0x281ef8, then the aim view again after 0x29fb8c's clear (ms.h): the byte, the pitch and the
+ * camera's aim (0x1baa4 returns at once while +0xacc is on; it restarts the aim after GU's 0x2a0624 ends it on an
+ * action change) */
+void ms_after_update(uint8_t *p)
+{
+    MS_AFTER_UPDATE_GU(p);
+    struct ms_state *s = ms_of(p);
+    if (!s->aim_view || !aim_want(p, s)) return;
+    aim_look(p, s);
+    MS_AIM_BYTE(p) = 1;
+    MS_AIM_PITCH(p) = (int16_t)s->aim_pitch;
+    uint8_t *cm = MS_CAM_MGR;
+    if (cm && quest_cam()) MS_CAM_AIM(cm, MS_AIM_MODE(p));
+}
+
+/* GU's common aim frame (0x2a72e0): rotation from body yaw and negative
+ * aim pitch, translated to player position + (0,150,0). GS's slot 260 only
+ * writes a matrix for k=12; leaving k=0 unwritten gives the quest aim camera
+ * an uninitialised matrix and eventually NaN eye/look coordinates. Use the
+ * same frame with our independent look yaw, without turning the hunter. */
+static void aim_frame(uint8_t *p, float *out, float yaw, float pitch)
+{
+    float y = (uint16_t)(int32_t)yaw * MS_U16_RAD;
+    float a = (uint16_t)(-(int16_t)pitch) * MS_U16_RAD;
+    float sy = sinf_gu(y), cy = cosf_gu(y), sp = sinf_gu(a), cp = cosf_gu(a);
+    out[0] = cy; out[1] = 0; out[2] = -sy; out[3] = 0;
+    out[4] = sp * sy; out[5] = cp; out[6] = sp * cy; out[7] = 0;
+    out[8] = cp * sy; out[9] = -sp; out[10] = cp * cy; out[11] = 0;
+    out[12] = pos_of(p)[0]; out[13] = pos_of(p)[1] + 150.0f;
+    out[14] = pos_of(p)[2]; out[15] = 1;
+}
+
+/* slot 260 (+0x410): the quest camera's aim mode 0 calls it right after setting its yaw +0x9dc / pitch +0x9d8 from
+ * the hunter (0x23f24): ours puts the look there (the camera looks along aim_yaw: +0x8000, as GU's own +0x14a0)
+ * instead of the turn target +0x14a0, so the hunter does not turn while aiming (MHF) */
+void ms_aim_cam(uint8_t *p, void *out, int k)
+{
+    MS_AIM_OFF_GU(p, out, k);
+    if (k) return;
+    struct ms_state *s = ms_of(p);
+    aim_frame(p, out, s->aim_view ? s->aim_yaw : FIELD(uint16_t, p, 0xfec),
+              s->aim_view ? s->aim_pitch : MS_AIM_PITCH(p));
+    uint8_t *cam = s->aim_view ? quest_cam() : 0;
+    if (!cam || FIELD(uint8_t *, cam, 0x85c) != p || !FIELD(uint8_t, cam, 0xacc) || FIELD(uint8_t, cam, 0xac8)) return;
+    FIELD(uint32_t, cam, 0x9dc) = ((uint32_t)(int32_t)s->aim_yaw + 0x8000u) & 0xffffu;
+    FIELD(int32_t, cam, 0x9d8) = (int16_t)s->aim_pitch;
+}
+
+static void marker_blink(uint8_t *p, struct ms_state *s)
+{
+    float t[3];
+    if (!marker(s, t)) return;
+    void *h = flash_at(p, t);
+    static int s_n;
+    if (s_n++ < 5) logf("msport: marker flash at %d %d %d (effect %x)", (int)t[0], (int)t[1], (int)t[2],
+                        (uint32_t)(uintptr_t)h);
+}
+
+/* every update, drawn or not: gauge regen, Magnetise timers, the marker's life, mode reset when sheathed, the
+ * Magnetic Shock task, the marker's and Magnetise's looks */
+/* MHF's converted effects (msfxposts.py -> ms_data.inc): motion rows posted once per motion run at their frame (MHF's
+ * fN: the first update at or after frame N), gated by Magnetise in the current mode; event rows queued (fx_queue)
+ * and posted after their delay in frames (MHF task ticks x 2) */
+static void *post_at(uint8_t *p, uint32_t id, const float *t, const float *rot_deg);
+static int joint_point(const uint8_t *u, uint32_t id, const int16_t *v, float t[3]);
+
+/* a fixed row (MHF per-motion keys 2 / 6 / 4 / 5, msfxposts.key_mode): the joint's world point (+ the offset in its
+ * frame) at the key's frame, posted there once (MHF copies the bone matrix: the effect stays), with the rotation of
+ * the key's follow mode d (0x1099a720, C): mode 1 = the joint's (d 0 / 2), 3 / 4 = (0, the hunter's yaw [+ 90 deg],
+ * 0) (d 3 / 4: 0x1146b370 with the yaw stored at the key, + 0x4000 for d 4); mode 2 / 5 = on the ground
+ * (MS_GROUND_Y) with the hunter's yaw [+ 90] (0x1099a970). Joint 0x80 | k = the drawn weapon's joint k
+ * (its model's joint records, part-0 object +0x23a0, test 6), 0xff = the hunter's own point */
+static void *fx_fixed(uint8_t *p, const struct ms_fxpost *f, uint32_t id)
+{
+    const uint8_t *u = (f->joint & 0x80) && f->joint != 0xff ? FIELD(const uint8_t *, p, 0x23a0) : p;
+    uint32_t j = f->joint == 0xff ? 0xffffffffu : f->joint & 0x7f;
+    float t[3], r[3] = {0, FIELD(uint16_t, p, 0xfec) * (360.0f / 65536.0f) + (f->mode == 4 || f->mode == 5 ? 90.0f : 0.0f), 0};
+    const uint8_t *ids = u ? FIELD(const uint8_t *, u, 0x498) : 0, *js = u ? FIELD(const uint8_t *, u, 0x494) : 0;
+    const float *m = (j != 0xffffffffu && ids && js && ids[j & 0xff] != 0xff) ? (const float *)(js + 0xa0 * ids[j & 0xff] + 0x10) : 0;
+    if (m) {
+        for (int k = 0; k < 3; k++) t[k] = f->off[0] * m[k] + f->off[1] * m[4 + k] + f->off[2] * m[8 + k] + m[12 + k];
+        if (f->mode == 1) {                             /* R = Rz Ry Rx (msfx.euler_xyz) of the joint's axes */
+            float sx = root(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+            if (sx < 1e-6f) sx = 1.0f;
+            float s2 = -m[2] / sx;
+            if (s2 > 1.0f) s2 = 1.0f;
+            if (s2 < -1.0f) s2 = -1.0f;
+            r[0] = atan2f_gu(m[6], m[10]) * 57.29578f;
+            r[1] = atan2f_gu(s2, root(1.0f - s2 * s2)) * 57.29578f;    /* asin */
+            r[2] = atan2f_gu(m[1], m[0]) * 57.29578f;
+        }
+    } else {
+        const float *q = pos_of(p);
+        for (int k = 0; k < 3; k++) t[k] = q[k];
+    }
+    if (f->mode == 2 || f->mode == 5) t[1] = MS_GROUND_Y(p);
+    return post_at(p, id, t, r);
+}
+
+/* Effect build diagnostic (test 22; the test-21 version read the post handle as the effect and printed garbage).
+ * C, GU 1.4 (notes/effect-posts.md "GU's post handle"): the post 0x282548 -> 0x53b500 -> 0x40978 returns a
+ * uMHProofEffect (0x350 B, ctor 0x41f10, vtable MAIN 0x1731578), the PROXY. 0x3267d0 finds the PEL record (PEL
+ * resource -> proxy +0x34, list +0x40, record index +0x44: record = *(*(PEL + list * 0x14 + 0x74) + index * 4), its
+ * u16 +0x50 = the PEL id, byte +0x5d -> proxy +0x158 = kind). The proxy's start step 0x329908 (vt +0x90, sub-step
+ * byte +0x31: 0 load -> 10 wait -> 0x14 -> 0x1e) loads the EFL (kind 0: resource +0x38, its +0x50 bit 0 = loaded,
+ * 0x10 = failed), then creates the EFFECT (vt +0x88 = 0x4260c: 0x500 B, vtable MAIN 0x17317dc) into +0x150 + 4 i,
+ * count +0x15c (kind 1: 0x42644 into +0x154 + 4 i); proxy byte +0x30 = 1 running, 2 killed (0x32a034 / 0x32a400),
+ * 3 ending (0x329dbc); unit state +0xc & 7 (1 / 2 alive). The effect's update (vt +0xd0 = 0x43ff4) builds it with
+ * 0x9bda64: no resource +0xf4 (or its u16 +0x74 count 0) -> +0xf0 |= 0x4000000; a generator's ready check (vt +0x3c)
+ * failing -> +0xf0 |= 0x2000000; built -> +0x118 |= 0x1000000; generators from +0x1f0, next +0xc. Generator fields
+ * (gu-efl-units.md, C): +0x28 runtime record (+0 flags: 0x10 model / 8 EAN not found, 0x2000 / 0x1000 empty path;
+ * +0x14 EAN, +0x18 model), +0x46 draw mode (Model: 5 / 0x1e effect draw, 0x37 scene), +0xed bit 2 scene mode (the
+ * Model ready check 0xa94b48 skips its material test then), +0xb0 live particles (next +4). Vtables Model 0x17907fc,
+ * Billboard 0x179017c, Polygon 0x17908fc.
+ * Every check failing prints "invalid" with the reason instead of reading on. Up to FXW_IDS PEL ids, the first post
+ * of each (motion rows, queued posts, carriers, Magnetise), dumped 2 and 12 updates after the post; generators summed
+ * per class (a generator with record flags gets its own line). */
+#define FXW_N 24
+#define FXW_IDS 128
+static struct { void *h; uint16_t id; uint8_t t, used; } s_fxw[FXW_N];
+static uint16_t s_fxw_ids[FXW_IDS]; static uint8_t s_fxw_cnt[FXW_IDS];
+static void fxw_add(void *h, uint32_t id)
+{
+    if (!h) return;
+    int k = 0;
+    while (k < FXW_IDS && s_fxw_cnt[k] && s_fxw_ids[k] != id) k++;
+    if (k == FXW_IDS || s_fxw_cnt[k] >= 1) return;
+    for (int i = 0; i < FXW_N; i++)
+        if (!s_fxw[i].used) {
+            s_fxw[i].h = h; s_fxw[i].id = (uint16_t)id; s_fxw[i].t = 0; s_fxw[i].used = 1;
+            s_fxw_ids[k] = (uint16_t)id; s_fxw_cnt[k]++;
+            return;
+        }
+}
+static void fxw_dump(int i)
+{
+    uint32_t h = (uint32_t)(uintptr_t)s_fxw[i].h, id = s_fxw[i].id, t = s_fxw[i].t;
+    const char *bad = 0;
+    uint32_t pel = 0, list = 0, idx = 0, rec = 0, n = 0;
+    if (!fxw_ok(h)) bad = "handle";
+    else if (FIELD(uint32_t, h, 0) != MAIN(FXW_PROXY_VT)) bad = "proxy vtable (freed or reused)";
+    else if (!fxw_ok(pel = FIELD(uint32_t, h, 0x34)) || (list = FIELD(uint32_t, h, 0x40)) > 2) bad = "PEL";
+    else if ((idx = FIELD(uint32_t, h, 0x44)) >= (n = FIELD(uint32_t, pel + list * 0x14, 0x68)) ||
+             !fxw_ok(FIELD(uint32_t, pel + list * 0x14, 0x74)) ||
+             !fxw_ok(rec = FIELD(uint32_t, FIELD(uint32_t, pel + list * 0x14, 0x74), idx * 4))) bad = "PEL record";
+    else if (FIELD(uint16_t, rec, 0x50) != id) bad = "PEL id (proxy reused)";
+    if (bad) { logf("msport: fxwatch %u t%u proxy %x invalid: %s", id, t, h, bad); return; }
+    uint32_t res = FIELD(uint32_t, h, 0x38), kids = FIELD(uint32_t, h, 0x15c), kind = FIELD(uint8_t, h, 0x158);
+    logf("msport: fxwatch %u t%u proxy %x unit %u state %u step %u kind %u efl %x (flags %x) effects %u, %d / 144 "
+         "proxies alive", id, t, h, FIELD(uint32_t, h, 0xc) & 7, FIELD(uint8_t, h, 0x30), FIELD(uint8_t, h, 0x31),
+         kind, res, fxw_ok(res) ? FIELD(uint32_t, res, 0x50) : 0, kids,
+         FIELD(int32_t, MAIN(0x1850a50), 0));           /* GU's live proxy counter, cap 144 (0x41558, C) */
+    if (kind != 0 || kids > 2) return;
+    for (uint32_t c = 0; c < kids; c++) {
+        uint32_t e = FIELD(uint32_t, h, 0x150 + 4 * c);
+        if (!fxw_ok(e) || FIELD(uint32_t, e, 0) != MAIN(FXW_EFF_VT)) {
+            logf("msport: fxwatch %u  effect %u %x invalid: vtable", id, c, e);
+            continue;
+        }
+        uint32_t f = FIELD(uint32_t, e, 0xf0), r = FIELD(uint32_t, e, 0xf4), g = FIELD(uint32_t, e, 0x1f0);
+        /* which build step stopped (0x9bda64, C): 0x9bdc68 creates the generators (per-class 0x1d0-B allocations,
+           count +0x1e0 lo16; a null one sets 0x2000000, a failed init 0x4000000), 0x9be320 allocates one work block
+           (+0x1f4: distinct slots x 0x130 + the generators' +0x20 sizes; null -> 0x2000000), 0x9be664 inits each
+           slot (count +0x1e4; one failing -> 0x2000000), then the ready checks (one failing -> 0x2000000) */
+        logf("msport: fxwatch %u  effect %u %x unit %u %s%s%s%s res %x (%u entries): gens %u, block %x, slots %u", id,
+             c, e, FIELD(uint32_t, e, 0xc) & 7, FIELD(uint32_t, e, 0x118) & 0x1000000 ? "built" : "not built",
+             f & 0x2000000 ? ", failed (0x2000000)" : "", f & 0x4000000 ? ", no resource / init (0x4000000)" : "",
+             f & 0x1000000 ? ", no entry kept (0x1000000)" : "",   /* the record mask kept none (0x9be8c4, C) */
+             r, fxw_ok(r) ? FIELD(uint16_t, r, 0x74) : 0, FIELD(uint16_t, e, 0x1e0), FIELD(uint32_t, e, 0x1f4),
+             FIELD(uint16_t, e, 0x1e4));
+        /* generators summed per class (count / scene mode / live particles), any with record flags printed */
+        static const uint32_t s_vt[3] = {0x17907fc, 0x179017c, 0x17908fc};
+        static const char *const s_cn[4] = {"Model", "Billboard", "Polygon", "other"};
+        int cnt[4] = {0}, scene[4] = {0}, live[4] = {0}, k = 0;
+        for (; k < 32 && g; k++) {
+            if (!fxw_ok(g)) { logf("msport: fxwatch %u   gen %d %x invalid: pointer", id, k, g); break; }
+            uint32_t v = FIELD(uint32_t, g, 0) - MAIN_BASE, gr = FIELD(uint32_t, g, 0x28), part = FIELD(uint32_t, g, 0xb0);
+            int c = v == s_vt[0] ? 0 : v == s_vt[1] ? 1 : v == s_vt[2] ? 2 : 3, n = 0;
+            for (uint32_t q = part; fxw_ok(q) && n < 999; q = FIELD(uint32_t, q, 4)) n++;
+            cnt[c]++; live[c] += n; scene[c] += (FIELD(uint8_t, g, 0xed) >> 2) & 1;
+            uint32_t rf = fxw_ok(gr) ? FIELD(uint32_t, gr, 0) : 0xffffffffu;
+            if (rf & 0x3018)
+                logf("msport: fxwatch %u   gen %d %s mode %x rec flags %x (0x10 model / 8 EAN not found, 0x2000 / "
+                     "0x1000 empty path) ean %x model %x", id, k, s_cn[c], FIELD(uint8_t, g, 0x46), rf,
+                     fxw_ok(gr) ? FIELD(uint32_t, gr, 0x14) : 0, fxw_ok(gr) ? FIELD(uint32_t, gr, 0x18) : 0);
+            g = FIELD(uint32_t, g, 0xc);
+        }
+        logf("msport: fxwatch %u   %d gens: Model %d (scene %d, live %d), Billboard %d (live %d), Polygon %d (live %d),"
+             " other %d (live %d)", id, k, cnt[0], scene[0], live[0], cnt[1], live[1], cnt[2], live[2], cnt[3], live[3]);
+    }
+}
+static void fxw_tick(void)
+{
+    for (int i = 0; i < FXW_N; i++) {
+        if (!s_fxw[i].used) continue;
+        s_fxw[i].t++;
+        if (s_fxw[i].t == 2 || s_fxw[i].t == 12) fxw_dump(i);
+        if (s_fxw[i].t >= 12) s_fxw[i].used = 0;
+    }
+}
+/* ms_post_n with every record watched (one PEL record per MHF base-offset group: each its own proxy) */
+static void *post_n_w(uint8_t *p, uint32_t id, uint32_t n)
+{
+    void *h = 0;
+    for (uint32_t k = 0; k < n; k++) { void *x = ms_post(p, id + k, p + 0x2550); fxw_add(x, id + k); if (!h) h = x; }
+    return h;
+}
+
+static void fx_posts(uint8_t *p, struct ms_state *s)
+{
+    uint32_t m = CUR_MOTION(p);
+    if (m != s->fx_mot) {
+        s->fx_mot = m;
+        for (int i = 0; i < 32; i++) s->fx_done[i] = 0;
+        int lo = 0, hi = MS_NFXPOSTS;                   /* the motion's first row (sorted by motion slot) */
+        while (lo < hi) { int mid = (lo + hi) / 2; if (ms_fxposts[mid].mot + 5000u < m) lo = mid + 1; else hi = mid; }
+        s->fx_first = (uint16_t)lo;
+    }
+    if (m < 5000 || m >= 6000) return;
+    m -= 5000;
+    uint16_t a = s->action;
+    int mag = s->mag[s->mode] == 1;
+    for (int k = 0; k < 256 && s->fx_first + k < MS_NFXPOSTS; k++) {
+        int i = s->fx_first + k;
+        const struct ms_fxpost *f = &ms_fxposts[i];
+        if (f->mot != m) break;
+        if (!f->n || (s->fx_done[k >> 3] & (1 << (k & 7)))) continue;
+        if (f->action != 0xffff && f->action != a) continue;
+        if ((f->gate == 1 && !mag) || (f->gate == 2 && mag)) continue;
+        if (!MS_REACHED(p, (float)f->frame)) continue;
+        s->fx_done[k >> 3] |= 1 << (k & 7);
+        void *h = 0;
+        if (f->mode) for (uint32_t r = 0; r < f->n; r++) { void *x = fx_fixed(p, f, f->id + r); if (!h) h = x; }
+        else h = post_n_w(p, f->id, f->n);
+        static int s_log;
+        if (s_log++ < 400)
+            logf("msport: mhf effect %u x%u at motion %u f%u (action %u, gate %u, mode %u joint %x): %x", f->id, f->n,
+                 m, f->frame, a, f->gate, f->mode, f->joint, (uint32_t)(uintptr_t)h);
+    }
+}
+
+static void fx_queue(uint8_t *p, struct ms_state *s, int k, int n)
+{
+    for (int i = k; i < k + n; i++) {
+        const struct ms_fxq *q = &ms_fxq[i];
+        if (!q->delay) { post_n_w(p, q->id, q->n); continue; }
+        for (int j = 0; j < MS_FXQ_MAX; j++)
+            if (s->fxq_t[j] <= 0) { s->fxq_t[j] = q->delay; s->fxq_id[j] = q->id; s->fxq_n[j] = q->n; break; }
+    }
+    if (n) logf("msport: mhf effect queue %d (%d posts)", k, n);
+}
+
+static void fx_queue_tick(uint8_t *p, struct ms_state *s, float tk)
+{
+    for (int j = 0; j < MS_FXQ_MAX; j++)
+        if (s->fxq_t[j] > 0 && (s->fxq_t[j] -= 2 * tk) <= 0) { s->fxq_t[j] = 0; post_n_w(p, s->fxq_id[j], s->fxq_n[j]); }
+}
+
+/* event 9's i-frame keep (MHF ext+0x284, C 2026-11-11, mechanics.md "Invincibility"): set by event 9 (0x10338320),
+ * cleared by events 7 / 8 (0x10338240 / 0x103382b0) and by 0x10a80050, which every action change runs (the setter
+ * 0x10a80a00, the MS change callback 0x10337c50 -> 0x10337c00 -> 0x10a80a00, the neutral setter 0x10a81af0): it never
+ * outlives the action that set it. Log: one line when it starts (event 9), one when it ends and why */
+static void keep_end(uint8_t *p, struct ms_state *s, const char *why, uint32_t next)
+{
+    if (!s->keep_if) return;
+    s->keep_if = 0;
+    static int s_n;
+    if (s_n++ < 40)
+        logf("msport: event-9 i-frame keep off (%s, next %u) after %d ticks of action %u, GU timer %d/60 s", why, next,
+             (int)s->keep_t, s->keep_no, (int)FIELD(float, p, 0x2b40));
+}
+
+static void tick(uint8_t *p, struct ms_state *s, float tk)
+{
+    ms_sound_tick(p, s, tk);
+    fx_posts(p, s);
+    fxw_tick();
+    fx_queue_tick(p, s, tk);
+    shock_tick(p, s, tk);
+    if (s->shot_on) {                                   /* the marker shot (S: GU's marker flash as its look) */
+        int r = shot_step(p, s, tk);
+        if (MS_FXQ_ON) {                                /* MHF: fc5:b on the shot, fc5:a dropped as its flight
+                                                           passes 100 / 300 / 600 / 1000 / 1500 (0x101e9070, C) */
+            static const float trail_d[5] = {100, 300, 600, 1000, 1500};
+            float t[3], lim = s->shot_t * SHOT_SPEED, rot[3];
+            if (r == 1 && marker(s, t)) lim = root(sq(t[0] - s->shot_o[0]) + sq(t[1] - s->shot_o[1]) + sq(t[2] - s->shot_o[2]));
+            shot_dir_deg(s, rot);
+            while (s->trail_k < 5 && trail_d[s->trail_k] <= lim) {
+                float d = trail_d[s->trail_k++] / SHOT_SPEED, q[3];
+                for (int k = 0; k < 3; k++) q[k] = s->shot_o[k] + s->shot_v[k] * d;
+                fx_at(p, MS_FXQ_TRAIL, q, rot, 0);
+            }
+            if (r) fx_stop(&s->shot_c, r == 1 ? "shot hit" : "shot ended"); else fx_follow(p, MS_FXQ_SHOT, s->shot_p, rot, &s->shot_c, 1e9f, tk);
+        }
+        if (r) s->shot_on = 0;
+        else if (!MS_FXQ_ON && (int)(s->shot_t * 0.5f) != (int)((s->shot_t - tk) * 0.5f)) flash_at(p, s->shot_p);   /* every
+                                                           2 ticks (MHF: special #9 trail posts at 100..1500 cm) */
+    }
+    if (s->mk_mon && MS_FXQ_ON) {                      /* MHF: fc5:e attached to the marker (special #2) */
+        float t[3];
+        if (marker(s, t)) fx_follow(p, MS_FXQ_MARKER, t, 0, &s->mk_c, 150.0f, tk);
+    }
+    else if (!MS_FXQ_ON && s->mk_mon && (s->mk_blink -= tk) <= 0) { s->mk_blink = MARKER_BLINK; marker_blink(p, s); }   /* GS's
+                                                           stand-in only without the MHF effects (test 21: it also
+                                                           ran every other update beside them) */
+    if (MS_FXQ_ON) { magz_look(p, s, tk); att_carriers(p, s, tk); rep_posts(p, s, tk); }
+    else if (s->mag[s->mode] == 1 && ms_drawn(p) && (s->aura_t -= tk) <= 0) {
+        s->aura_t = AURA_EVERY;
+        MS_EFFECT(p, MS_EFX_AURA);
+    }
+    if (s->gauge < GAUGE_MAX && (s->regen += tk) >= 30) { s->regen -= 30; gauge_add(s, REGEN); }
+    for (int m = 0; m < 2; m++) {
+        if (!s->mag[m] || (s->mag_v[m] -= tk) > 0) continue;
+        s->mag[m] = s->mag[m] == 1 ? 2 : 0;
+        s->mag_v[m] = s->mag[m] == 2 ? MAG_LOCK : 0;
+        logf("msport: %s Magnetise %s", m ? "Impact" : "Cutting", s->mag[m] == 2 ? "over: lockout" : "charging");
+    }
+    if (s->mk_mon) {
+        if (!s->att) s->mk_t -= tk;                     /* frozen during the attraction */
+        if (s->mk_t <= 0 || !em_alive(s->mk_mon, p)) {
+            int inmgr = 0;
+            void *mgr = MS_EM_MGR;
+            for (int i = 0; mgr && i < 10; i++) if (MS_EM_GET(mgr, i) == s->mk_mon) inmgr = 1;
+            uint8_t *mr = inmgr ? em_rec(s->mk_mon) : 0;
+            logf("msport: marker gone (%d ticks left, alive %d: in manager %d, small %u, hp %d, area %u, hunter area %u)",
+                 (int)s->mk_t, em_alive(s->mk_mon, p), inmgr, inmgr ? FIELD(uint8_t, s->mk_mon, 0xb5f7) : 0,
+                 inmgr && mr ? FIELD(int32_t, mr, 0x370) : 0, inmgr ? FIELD(uint8_t, s->mk_mon, 0x1054) : 0,
+                 FIELD(uint8_t, p, 0x1054));
+            s->mk_mon = 0;
+            fx_stop(&s->mk_c, "marker gone");
+        }
+    }
+    if (!ms_drawn(p)) { s->mode = 0; s->flags &= ~(1u | 0x8000u); }
+    if (FIELD(uint16_t, p, 0x2506) != 0x10) {          /* GU's own action (hit, roll...): no flight, no pin */
+        keep_end(p, s, "GU action", FIELD(uint16_t, p, 0x250a));   /* MHF: that change also runs 0x10a80050 */
+        s->air = 0; s->att = 0; s->pin_mon = 0; s->pin_pending = 0;
+        s->flags &= ~0x1010u;
+    }
+    if (!(s->flags & 1) && s->aim_view) aim_view(p, s);   /* sheathed / ended outside ms_input */
+}
+
+static void recovery_clock(uint8_t *p, struct ms_state *s)
+{
+    if (FIELD(uint16_t,p,0x2506)==0x10 && FIELD(uint16_t,p,0x250a)==s->action)
+        s->action_clock += FIELD(float,p,0x1c);
+    else s->action_clock = s->recovery_end = 0;
+}
+
+void ms_input(uint8_t *p)
+{
+    INPUT_PRE(p);
+    trace(p);
+    struct ms_state *s = ms_of(p);
+    recovery_clock(p,s);
+    static int s_stats;
+    elem_fix(p);
+    if (!s_stats++) {                                   /* test 5: no element in the smithy nor on hits: the stats the
+                                                           attack's element setup 0x2acfb8 reads (vt+0x15c 0x11 / 2) */
+        typedef int (*ms_stat_t)(void *u, uint32_t k);
+        ms_stat_t st = (ms_stat_t)MS_VT(p, 0x15c);
+        logf("msport: hunter stats: element type %d value %d, raw %d", st(p, 0x11), st(p, 2), st(p, 0));
+    }
+    tick(p, s, tick_len(p));
+    {                                                   /* hit diag: a hit (GU's damage actions, category 64) during
+                                                           one of ours: which, how far in, the i-frames given */
+        uint32_t st = FIELD(uint16_t, p, 0x2506), no = FIELD(uint16_t, p, 0x250a);
+        static int s_dmg;
+        if (st == 64 && s->was_st == 0x10 && s_dmg++ < 30)
+            logf("msport: hit into 64/%u during action %u at motion frame %d (i-frames given %d ticks, timer now %d)",
+                 no, s->was_no, (int)s->was_f, (int)s->if_given, (int)FIELD(float, p, 0x2b40));
+        s->was_st = (uint8_t)st;
+        if (st != 64) { s->was_no = (uint16_t)no; s->was_f = MS_FRAME(p); }
+        if (st != 0x10) s->if_given = 0;
+    }
+    if (s->chk_hit && MS_FRAME(p) >= s->chk_f) { hit_check(p, s->chk_hit, 1); s->chk_hit = 0; }
+    if (s->tr_n) { s->tr_n--; slot_trace(p, s); }
+    uint32_t combo = FIELD(uint32_t, p, 0x1444), r = R_MASK();
+    uint32_t held = FIELD(uint16_t, p, 0x13f4), trig = FIELD(uint16_t, p, 0x13f8);
+    if ((held & BTN_ZR) && !(held & r) && ms_drawn(p)) s->flags |= 1; else s->flags &= ~1u;
+    aim_view(p, s);
+    uint32_t jst = FIELD(uint16_t, p, 0x2506), jno = FIELD(uint16_t, p, 0x250a);
+    if (jst == 1 && (jno == 4 || jno == 5 || jno == 137 || jno == 140)) {
+        static int s_n, s_first;                        /* test 4: "no jump attack" (tables 18 / 19, falling 59 / 73);
+                                                           test 5: no press logged in three hops; test 6: one jump,
+                                                           nothing until RB at frame 41: is this polled earlier? */
+        static float s_last = 1e9f;
+        float f = MS_FRAME(p);
+        if (f < s_last && s_first++ < 20) logf("msport: jump %u: first input frame %d, held %x", jno, (int)f, held);
+        s_last = f;
+        if (s_n++ < 120)                                /* test 7: 3 hops, no change logged: every frame now */
+            logf("msport: jump %u: held %x pressed %x combo %x table %u frame %d", jno, held, trig, combo,
+                 FIELD(uint32_t, p, 0x24ac), (int)f);
+    }
+    if (trig && jst == 0x10 && (jno == 57 || jno == 76 || jno == 77 || jno == 114 || jno == 115)) {
+        static int s_gc;                                /* after test 14: "Guard Counter -> X + A does nothing": MHF's
+                                                           follow-ups are tri + circle (combo 0x40, Xbox Y + B) -> 154
+                                                           from f68, tri -> 16 in f46-f76 */
+        if (s_gc++ < 40) logf("msport: GC follow-up press %x held %x combo %x in %u frame %d", trig, held, combo, jno,
+                              (int)MS_FRAME(p));
+    }
+    if (trig) {                                         /* test 8: no Y in any hop frame: every press while airborne */
+        static int s_air;
+        int h = (int)(pos_of(p)[1] - MS_GROUND_Y(p));
+        if (h > 20 && s_air++ < 40) logf("msport: air press %x held %x combo %x in %u/%u frame %d, %d cm up", trig, held,
+                                         combo, jst, jno, (int)MS_FRAME(p), h);
+    }
+    uint32_t base = s->mode ? MS_ID_IMPACT : 0, set = 0;
+    for (uint32_t k = 0; k < MS_NPAIRS; k++) {
+        uint32_t in = ms_pairs[k].inp, c = ms_pairs[k].cond;
+        if ((in == 23 || in == 24) && (c == 10 || c == 11) && input(s, in, held, trig, combo, r) && !cond(p, s, c)) {
+            static int s_ref;                           /* test 7: "cannot trigger attract / repulse" */
+            if (s_ref++ < 20) logf("msport: aim %s refused: marker %d cm (attract 1400-4000, repel 0-1400), gauge %d, "
+                                   "stamina %d", in == 24 ? "Y" : "A", (int)marker_dist(p, s), s->gauge,
+                                   (int)MS_STAMINA_NOW(p));
+        }
+    }
+    for (uint32_t k = 0; k < MS_NPAIRS; k++)
+        if (input(s, ms_pairs[k].inp, held, trig, combo, r) && cond(p, s, ms_pairs[k].cond)) {
+            MS_SET_CLASS_ID(p, base + k);
+            set = 1;
+        }
+    if (held & r) {                     /* R + B / Y = R1 + special / evade: not GU's roll (common ids 49 / 50, the
+                                           plcmd_com 0x0001_013a / 014a ids) nor its sheathe (test 1: R + B at idle
+                                           sheathed, common 1/2 comes before our commands in the idle table) */
+        static int s_n;
+        if ((trig & PAD_L) && s_n++ < 8) logf("msport: R + B: common ids %x %x", FIELD(uint32_t, p, 0x1414),
+                                              FIELD(uint32_t, p, 0x1418));
+        FIELD(uint32_t, p, 0x1418) &= ~(3u << 17);
+        if (set && (trig & (PAD_L | PAD_D))) {          /* test 15: R + A rolled (1/6) when the gauge was under one
+                                                           bar (MHF's cost, condition 1); with our command set, GU's
+                                                           moving roll ids go too */
+            FIELD(uint32_t, p, 0x1414) &= ~(CID_SHEATHE | CID_ROLL_LO);
+            FIELD(uint32_t, p, 0x1418) &= ~CID_ROLL_HI;
+        }
+    }
+    if ((s->flags & 1) && trig) {                       /* test 10: aim + A rolled, no aim + A ever matched */
+        static int s_ap;
+        if (s_ap++ < 20) logf("msport: aim press %x held %x combo %x common %x %x in %u/%u", trig, held, combo,
+                              FIELD(uint32_t, p, 0x1414), FIELD(uint32_t, p, 0x1418), FIELD(uint16_t, p, 0x2506),
+                              FIELD(uint16_t, p, 0x250a));
+    }
+    if (s->flags & 1) {                                 /* aiming: Y is not GU's sheathe (test 3), A not its roll */
+        FIELD(uint32_t, p, 0x1414) &= ~(CID_SHEATHE | CID_ROLL_LO);
+        FIELD(uint32_t, p, 0x1418) &= ~CID_ROLL_HI;     /* test 13: 1/6's ids were never cleared (S: MHF's evade
+                                                           input 0 has no aim test; the maintainer: no roll) */
+    }
+    uint32_t held32 = FIELD(uint32_t, p, 0x13fc);
+    if ((held32 ^ s->held32) & ~0xfffu) {
+        static int s_n;
+        if (s_n++ < 60) logf("msport: other buttons %x (was %x)", held32, s->held32);
+    }
+    s->held32 = held32;
+    if (held != s->held) {
+        static int s_n;
+        if (s_n == 0) logf("msport: GU's R role mask %x, dt %d/100", r, (int)(FIELD(float, p, 0x1c) * 100));
+        if (s_n++ < 300) logf("msport: buttons held %x (was %x) pressed %x combo %x", held, s->held, trig, combo);
+    }
+    s->held = held;
+}
+
+/* ------------------------------------------------------------------------------------------------ hits, guard */
+
+/* the hit check (test build; test 5: hits land up to 0.45 s after their swing, at motion frames 33-35 whenever they
+ * arm): an armed attack's first hand capsule end B (msbuild HIT_CAPS) placed as GU places it (the hunter's joint,
+ * world matrix of its joint record: joints +0x494, index from the id table +0x498, 160 bytes, rows +0x10 / +0x20 /
+ * +0x30, position +0x40, as GU's lookup 0x53ab30) against the same point on the drawn weapon (its weapon bone in the
+ * weapon model's own joint records, the part-0 object +0x23a0, same layout assumed), at arming and 8 frames later */
+#define MS_HIT_CHECK 0                  /* test 6: 0 cm at 31 of 37 checks, 16-18 cm at a few arming frames: placement
+                                           is right */
+
+static int joint_point(const uint8_t *u, uint32_t id, const int16_t *v, float t[3])
+{
+    const uint8_t *ids = u ? FIELD(const uint8_t *, u, 0x498) : 0, *js = u ? FIELD(const uint8_t *, u, 0x494) : 0;
+    if (!ids || !js || ids[id & 0xff] == 0xff) return 0;
+    const float *m = (const float *)(js + 0xa0 * ids[id & 0xff] + 0x10);
+    for (int k = 0; k < 3; k++) t[k] = v[0] * m[k] + v[1] * m[4 + k] + v[2] * m[8 + k] + m[12 + k];
+    return 1;
+}
+
+static void hit_check(uint8_t *p, uint32_t hit, int late)
+{
+    if (!MS_HIT_CHECK || hit >= MS_NCAPS || !ms_hit_cap[hit][0]) return;
+    const int16_t *c = ms_hit_cap[hit], z[3] = {0, 0, 0};
+    float a[3], b[3], h[3], r[3];
+    uint8_t *w = FIELD(uint8_t *, p, 0x23a0);
+    if (!joint_point(p, c[0], c + 4, a) || !joint_point(w, c[7], c + 11, b) || !joint_point(p, c[0], z, h) ||
+        !joint_point(w, 0, z, r)) return;
+    static int s_n;
+    if (s_n++ < 200)
+        logf("msport: hit %u check%s f%d: capsule end (%d %d %d), drawn blade (%d %d %d): %d cm apart; hand (%d %d %d), "
+             "weapon root (%d %d %d)", hit, late ? " +8" : "", (int)MS_FRAME(p), (int)a[0], (int)a[1], (int)a[2],
+             (int)b[0], (int)b[1], (int)b[2], (int)root(sq(a[0] - b[0]) + sq(a[1] - b[1]) + sq(a[2] - b[2])),
+             (int)h[0], (int)h[1], (int)h[2], (int)r[0], (int)r[1], (int)r[2]);
+}
+
+static int em_near(uint8_t *p)          /* ground distance (cm) to the nearest large monster's origin, -1 = none */
+{
+    void *mgr = MS_EM_MGR;
+    float *q = pos_of(p), best = -1;
+    for (int i = 0; mgr && i < 10; i++) {
+        uint8_t *m = MS_EM_GET(mgr, i);
+        if (!em_ok(m)) continue;
+        uint8_t *r = em_rec(m);
+        float d = root(sq(FIELD(float, r, 0x40) - q[0]) + sq(FIELD(float, r, 0x48) - q[2]));
+        if (best < 0 || d < best) best = d;
+    }
+    return (int)best;
+}
+
+static void arm(uint8_t *p, struct ms_state *s, uint32_t hit)
+{
+    if (!hit) return;
+    hit_check(p, hit, 0);
+    s->chk_hit = (uint16_t)hit; s->chk_f = MS_FRAME(p) + 8.0f;
+    int d = em_near(p);                                 /* test 4's log ran out in the village: quests only */
+    static int s_n;
+    if (d >= 0 && s_n++ < 400) logf("msport: armed hit %u in action %u at f%d, monster %d cm", hit, s->action,
+                                    (int)MS_FRAME(p), d);
+    if (s->mag[s->mode] == 1) hit += MS_MAG_BASE;       /* Magnetise: MV x 1.1 (msbuild's copies) */
+    s->slot ^= 1;                                       /* two slots: an attack may still be live when the next arms */
+    s->armed[s->slot] = (uint16_t)hit;
+    MS_ARM(p, s->slot, hit, 3);                         /* GU's weapon classes pass 3 or 0; 0x2b76cc sets the
+                                                           element (bit 1) only for a non-zero value (test 4: 0, the
+                                                           fire / dragon spikes hit raw) */
+    ms_apply_hit_stats(p,s->slot,hit);
+    unsigned base_hit=hit>MS_MAG_BASE?hit-MS_MAG_BASE:hit;
+    ms_world_hit_armed(p,s->slot,hit,base_hit>=MS_HIT_SHOCK && base_hit<MS_HIT_SHOCK+MS_NSHOCK);
+    static int s_tr;                                    /* test 6: every hit landed at motion frame >= ~33 whatever
+                                                           its arming frame (f11 -> +0.37 s, f27 -> +0.10 s) */
+    if (MS_FRAME(p) < 30.0f && s_tr++ < 6) { s->tr_n = 40; s->tr_slot = s->slot; s->tr_hit = (uint16_t)hit; }
+}
+
+/* the armed slot (p + 0x3020 + slot * 0xb8, filled by 0x2b72d4 / 0x168960) once per update: which field holds the
+ * hit back until ~f33 */
+static void slot_trace(uint8_t *p, struct ms_state *s)
+{
+    uint8_t *a = p + 0x3020 + s->tr_slot * 0xb8;
+    logf("msport: slot %u hit %u f%d: +4 %x +30 %x +38 %d +48 %x +4c %x +5c %d +60 %d +6e %u +70 %x, 31b4 %x",
+         s->tr_slot, s->tr_hit, (int)MS_FRAME(p), FIELD(uint32_t, a, 4), FIELD(uint32_t, a, 0x30),
+         FIELD(int16_t, a, 0x38), FIELD(uint32_t, a, 0x48), FIELD(uint32_t, a, 0x4c),
+         (int)(FIELD(float, a, 0x5c) * 10), (int)(FIELD(float, a, 0x60) * 10), FIELD(uint8_t, a, 0x6e),
+         FIELD(uint32_t, a, 0x70), FIELD(uint32_t, p, 0x31b4));
+}
+
+/* the hunter's element stats GU's arming reads (0x2acfb8: vt+0x15c keys 0x11 type, 2 value = hunter data +0x320 +
+ * 2 key). GU's equip-time fill 0xdee34 takes them from 0xdb984 / 0xdba5c, which answered 0 for type 12 until
+ * build.py MS_ELEMENT_MASKS (test 13). Check + fallback: GU's values logged once; the equipped record's written only
+ * if GU still left the type 0 (the fallback loses element skills). Weapon entry copy = hunter data +0x18 + 0x2c k
+ * (box entry layout: +4 type, +6 id) */
+static void elem_fix(uint8_t *p)
+{
+    uint8_t *hd = FIELD(uint8_t *, p, 0x13c4);
+    uint32_t t, v, k;
+    if (!hd) return;
+    for (k = 0; k < 8 && (FIELD(uint16_t, hd, 0x1c + 0x2c * k) & 0x1f) != MS_TYPE; k++) ;  /* test 7: not slot 0 (the
+                                                           slot comes from the type, 0xdae68) */
+    static int s_n;
+    if (k == 8) { if (!s_n++) logf("msport: element fix: no type-12 entry at hunter data +0x18 + 0x2c k"); return; }
+    uint32_t id = FIELD(uint16_t, hd, 0x1e + 0x2c * k);
+    int16_t *st = (int16_t *)(hd + 0x320);
+    static int s_gu;
+    if (!s_gu++) logf("msport: element: GU filled type %d value %d for weapon %u", st[0x11], st[2], id);
+    if (st[0x11]) return;
+    if (!ms_weapon_element(id, &t, &v) || !t) {         /* test 8: silent here: which entry / id was read */
+        static int s_bad;
+        if (!s_bad++) logf("msport: element fix: slot %u id %u has no element (entry %x %x %x)", k, id,
+                           FIELD(uint32_t, hd, 0x18 + 0x2c * k), FIELD(uint32_t, hd, 0x1c + 0x2c * k),
+                           FIELD(uint32_t, hd, 0x20 + 0x2c * k));
+        return;
+    }
+    if (s_n++ < 4) logf("msport: element fix: slot %u weapon %u, GU had type %d value %d -> %u / %u", k, id, st[0x11],
+                        st[2], t, v);
+    st[0x11] = (int16_t)t; st[2] = (int16_t)v;
+}
+
+/* slot 37 (+0x94): GU calls it after the damage of the owner's attack on a monster (kind 1). MHF on hit: gauge
+ * + 600 * MV / 100, this mode's Magnetise charge + MV * 80 / 100 while charging; the pin attack starts the pin */
+void ms_on_hit(uint8_t *p, uint8_t *atk, uint8_t *mon, uint32_t kind)
+{
+    if (kind != 1 || !mon) return;
+    struct ms_state *s = ms_of(p);
+    uint32_t slot = (uint32_t)(atk - (p + 0x3020)) / 0xb8, hit = slot < 2 ? s->armed[slot] : 0;
+    uint32_t mv = hit < MS_NHITS ? ms_hit_mv[hit] : 0, m = s->mode;
+    gauge_add(s, HIT_GAIN * (int32_t)mv / 100);
+    if (s->mag[m] == 0 && s->mag_v[m] < MAG_READY) {
+        s->mag_v[m] += mv * MAG_CHARGE / 100.0f;
+        if (s->mag_v[m] >= MAG_READY) { s->mag_v[m] = MAG_READY; logf("msport: %s Magnetise ready", m ? "Impact" : "Cutting"); }
+    }
+    /* A confirmed hit can change GU's transient hurt/AI gates before this
+     * callback. Membership, life and area govern ownership after the hit. */
+    if ((s->action == 94 || s->action == 97) && !s->pin_mon && em_alive(mon,p) && !FIELD(uint8_t,mon,0xb5f7))
+        s->pin_pending = mon;
+    static int s_n;
+    if (s_n++ < 300) logf("msport: hit %u (MV %u) slot %u on monster %x in action %u", hit, mv, slot,
+                          (uint32_t)(uintptr_t)mon, s->action);
+}
+
+/* slot 356 (+0x590): the guard reaction (p, level 0 / 1 / 2, attack info p+0x3214, damage). MHF: a guarded hit
+ * counts (MS+0x66, the Guard Counter's 207 -> 57 / 76 / 77) and sets MS flag 0x8 (112 -> 113). The action goes on:
+ * GU's default reaction (0x2f4b20: guard knock-back actions with class motions) is not run; guard stamina as GU's */
+void ms_guarded(uint8_t *p, uint32_t level, uint8_t *info, int32_t *dmg)
+{
+    (void)info;
+    struct ms_state *s = ms_of(p);
+    if (s->gc_hits < 255) s->gc_hits++;
+    ms_sound_guarded(p,s);
+    s->flags |= 8;
+    MS_GUARD_STAMINA(p);
+    void *h = 0;                                        /* MHF: guard 14 (< 2 guard hits) / Impact guard 112 */
+    if (MS_FXQ_ON) {
+        if (s->action == 112) fx_queue(p, s, MS_FXQ_GUARD112);
+        else if (s->action == 14 && s->gc_hits < 2) fx_queue(p, s, MS_FXQ_GUARD);
+    } else h = MS_EFFECT(p, MS_EFX_GUARD);
+    logf("msport: guarded hit %u (level %u, damage %d) in action %u, effect %x (list handle %x)", s->gc_hits, level,
+         dmg ? (int)*dmg : 0, s->action, (uint32_t)(uintptr_t)h, FIELD(uint32_t, p, 0x3304));
+}
+
+/* slot 44 (+0xb0): "invulnerable now" (GU 0x2a680c: +0x274a bit 0 or the i-frame timer). The hit filter 0x16b15c
+ * asks it for an attack that overlaps the hunter (after its collision test 0x169878): an attack met in the
+ * Magnetic Evasion's i-frames (116 / 117 / 158) = MHF's MS flag 0x20000, condition 12 (C: it gates only
+ * 116 / 117 -> 160 / 159 and 158 -> 162, the stronger Magnetic Shocks; MHF's setter not found, S) */
+typedef int (*ms_inv_t)(void *p);
+int ms_invuln(uint8_t *p)
+{
+    int r = FN(ms_inv_t, 0x2a680c)(p);
+    uint32_t no = FIELD(uint16_t, p, 0x250a);
+    if (r && FIELD(uint16_t, p, 0x2506) == 0x10 && (no == 116 || no == 117 || no == 158)) {
+        struct ms_state *s = ms_of(p);
+        if (!(s->flags & 0x20000)) logf("msport: Magnetic Evasion through an attack (action %u)", no);
+        s->flags |= 0x20000;
+    }
+    return r;
+}
+
+/* ------------------------------------------------------------------------------------------------ motion */
+
+static void set_air(uint8_t *p, struct ms_state *s)
+{
+    if (s->air) return;
+    s->air = 1; s->vy = 0;
+    s->air_lifted = pos_of(p)[1] > MS_GROUND_Y(p) + 0.01f;
+    MS_MOVE_STATE(p, 2);
+}
+
+/* the attraction (MHF 0x10331780 start, 0x10332dd0 update, 0x10332ae0 steering; C, mechanics.md):
+ * - target T (0x10331540) = the marker + RotY(yaw to it) (0, 100, -200): 1 m above, 2 m short of it (S: the frame);
+ * - direction D (MS+0xc) = toward T at the start, pitch held off the ground (D.y >= -h / 90 within 90 of it), then
+ *   kept: each tick of phases 1-2, while |T - pos| > 200, D = normalize(0.2 D + 0.8 toward the new T) and the budget
+ *   B (MS+0x40, start |T - pos| - 300, 700 if not positive) += the change of |T - pos|;
+ * - 1 ease-in v = 90 (0.2 n)(2 - 0.2 n) along D for 4 ticks, 2 fly 90 / tick for max(0, B - 252) / 90 ticks
+ *   (0x10332930), 3 fall (below); height kept in [y0 - 550, y0 + 1000] of the START height (MS+0x3c), B x 0.9 while
+ *   at the top (tests 15-17: "too high": ours clamped around the marker's height and re-aimed fully every tick) */
+static void att_target(uint8_t *p, const float *m, float *tg)
+{
+    float *q = pos_of(p), dx = m[0] - q[0], dz = m[2] - q[2], n = root(dx * dx + dz * dz);
+    float fx = n > 1 ? dx / n : 0, fz = n > 1 ? dz / n : 1;    /* RotY(yaw to the marker) (0, 100, -200) */
+    tg[0] = m[0] - 200 * fx; tg[1] = m[1] + 100; tg[2] = m[2] - 200 * fz;
+}
+
+static float att_dist(uint8_t *p, const float *tg)
+{
+    float *q = pos_of(p);
+    return root(sq(tg[0] - q[0]) + sq(tg[1] - q[1]) + sq(tg[2] - q[2]));
+}
+
+static void att_dir(uint8_t *p, float *v)             /* normalize, pitch held off the ground (0x10331780) */
+{
+    float h = pos_of(p)[1] - MS_GROUND_Y(p), n = root(sq(v[0]) + sq(v[1]) + sq(v[2]));
+    if (n < 1e-4f) return;
+    for (int i = 0; i < 3; i++) v[i] = v[i] / n * 90;
+    if (v[1] < 0 && h <= 90) v[1] = -(h < 0 ? 0 : h);
+    n = root(sq(v[0]) + sq(v[1]) + sq(v[2]));
+    for (int i = 0; i < 3; i++) v[i] = n > 1e-4f ? v[i] / n : 0;
+}
+
+/* one diagnostic line per attraction (2026-11-11, "too high"): the flight's numbers, printed when it ends */
+static struct { uint8_t *p; float mk_y, tg_y, y0, peak, ticks; int phase; } s_attlog;
+
+static void att_log(uint8_t *p, struct ms_state *s, const char *why)
+{
+    if (s_attlog.p != p) return;
+    float *q = pos_of(p), dh = root(sq(s->att_tg[0] - q[0]) + sq(s->att_tg[2] - q[2]));
+    logf("msport: attraction end (%s, action %u): marker y %d, target y %d, start y %d, peak y %d, end y %d, "
+         "%d cm to the target horizontally, %d ticks, phase %d", why, s->action, (int)s_attlog.mk_y,
+         (int)s_attlog.tg_y, (int)s_attlog.y0, (int)s_attlog.peak, (int)q[1], (int)dh, (int)s_attlog.ticks,
+         s_attlog.phase);
+    s_attlog.p = 0;
+}
+
+static void att_start(uint8_t *p, struct ms_state *s, const float *m)
+{
+    float *q = pos_of(p);
+    att_target(p, m, s->att_tg);
+    for (int i = 0; i < 3; i++) s->dir[i] = s->att_tg[i] - q[i];
+    {                                                   /* MHF 0x103328d0 (C): the start pitch clamped to 25 deg up
+                                                           (0xee39) / 10 deg down (0x71c) */
+        float h = root(sq(s->dir[0]) + sq(s->dir[2]));
+        if (s->dir[1] > 0.46631f * h) s->dir[1] = 0.46631f * h;
+        else if (s->dir[1] < -0.17633f * h) s->dir[1] = -0.17633f * h;
+    }
+    att_dir(p, s->dir);
+    s->att_b = att_dist(p, s->att_tg) - 300;
+    if (s->att_b <= 0) s->att_b = 700;
+    s->att_y0 = q[1];
+    s->att_h = 90;                                      /* MHF 0x103327a0 (C): 90 x 0.97^N, N = MS+0x45 = ticks since
+                                                           the flight's first tick, decayed in every phase */
+    s_attlog.p = p; s_attlog.mk_y = m[1]; s_attlog.tg_y = s->att_tg[1]; s_attlog.y0 = q[1]; s_attlog.peak = q[1];
+    s_attlog.ticks = 0; s_attlog.phase = 1;
+}
+
+static int attraction(uint8_t *p, struct ms_state *s, float tk)
+{
+    float t[3], *q = pos_of(p);
+    if (s_attlog.p == p) {
+        s_attlog.ticks += tk;
+        if (q[1] > s_attlog.peak) s_attlog.peak = q[1];
+        if (s->att > s_attlog.phase) s_attlog.phase = s->att;
+    }
+    if (s->att < 3 && !marker(s, t)) { s->att = 3; s->att_t = 0; }
+    if (s->att < 3) {
+        float tg[3];
+        att_target(p, t, tg);
+        float d1 = att_dist(p, tg);
+        s->att_h *= 1 - 0.03f * tk;                     /* the fall's 0.97^N runs from the first tick (0x103327a0) */
+        if (root(sq(tg[0] - q[0]) + sq(tg[2] - q[2])) > 200) {   /* steering (0x10332ae0): the gate is the
+                                                           HORIZONTAL distance (y zeroed, C) */
+            float d0 = att_dist(p, s->att_tg), v[3];
+            for (int i = 0; i < 3; i++) v[i] = 0.2f * s->dir[i] + 0.8f * (tg[i] - q[i]) / d1;
+            att_dir(p, v);
+            for (int i = 0; i < 3; i++) { s->dir[i] = v[i]; s->att_tg[i] = tg[i]; }
+            s->att_b += d1 - d0;
+        }
+        face(p, yaw_to(s->dir[0], s->dir[2]));
+        float go;
+        if (s->att == 1) {
+            float u = 0.2f * s->att_t;
+            go = 90 * u * (2 - u) * tk;
+            if ((s->att_t += tk) > 4) { s->att = 2; s->att_t = 0; }
+        } else {
+            go = 90 * tk;
+            float ticks = s->att_b > 252 ? (s->att_b - 252) * (1.0f / 90) : 0;
+            if ((s->att_t += tk) >= ticks) {
+                s->att = 3; s->att_t = 0; s->vy = s->dir[1] * s->att_h;   /* att_h kept (0.97^N, 0x103327a0) */
+                logf("msport: attraction: falling (%d cm to the target, budget %d)", (int)d1, (int)s->att_b);
+            }
+        }
+        for (int i = 0; i < 3; i++) q[i] += s->dir[i] * go;
+        if (q[1] >= s->att_y0 + 1000) { s->att_b *= 1 - 0.1f * tk; q[1] = s->att_y0 + 1000; }
+        if (q[1] < s->att_y0 - 550) q[1] = s->att_y0 - 550;
+        return 0;
+    }
+    s->att_t += tk;
+/* MHF case 3 (0x103327a0, C): n fall ticks, v = 90 x 0.97^n along the flight's 3-D unit direction, plus n x g
+     * down (g 2.3, or event 31's with MS flag 0x80); the landing test once the step goes down */
+    float g = (s->flags & 0x80) ? s->fall_g : 2.3f, n = s->att_t - tk;
+    s->vy = s->dir[1] * s->att_h - g * n;
+    for (int i = 0; i < 3; i += 2) q[i] += s->dir[i] * s->att_h * tk;
+    q[1] += s->vy * tk;
+    s->att_h *= 1 - 0.03f * tk;
+    return s->vy < 0 && MS_LANDED(p, 0.0f, 0);
+}
+
+/* MHF's drive (0x1032f700, C from its asm; curve bits from events 29 / 30, 0x10338c90: p 1 -> 1, 2 -> 2, 3 -> 4):
+ * n = ticks since the drive started; this tick's displacement = 0 at n = 0, then speed * 0.97^n (bit 1), n * speed
+ * (bit 2), else speed. Returns this update's displacement */
+static float drive_step(float speed, uint32_t bits, float *n, float *k, float tk)
+{
+    float out = *n < 1 ? 0 : (bits & 2) ? speed * *n : (bits & 1) ? speed * *k : speed;
+    *n += tk;
+    if (bits & 1) *k *= 1 - 0.03f * tk;
+    return out * tk;
+}
+static uint8_t curve_bits(uint32_t p) { return p == 1 ? 1 : p == 2 ? 2 : p == 3 ? 4 : 0; }
+
+/* airborne actions: event 28's drive, event 25's y -= g * 0.1 * t per tick, event 31's gravity (or 2.3 when nothing
+ * drives the fall, S). Returns 1 on landing */
+static const struct ms_action *find(uint32_t no);
+static int launch_pending(const struct ms_state *s)
+{
+    const struct ms_action *a=find(s->action);
+    if (!a) return 0;
+    for (unsigned i=0;i<a->nevents;i++) {
+        const struct ms_event *e=&ms_events[a->ev0+i];
+        if (!(s->fired & (1u<<i)) && e->id==28 && (int8_t)e->prm>0) return 1;
+    }
+    return 0;
+}
+static int fall(uint8_t *p, struct ms_state *s, float tk)
+{
+    float dy = s->vert ? drive_step(s->vert, s->curve >> 4, &s->vert_n, &s->vert_k, tk) : 0;
+    dy -= s->grav * 0.1f * s->grav_t * tk;
+    if ((s->flags & 0x80) || (!s->grav && s->vert <= 0)) {
+        s->vy -= ((s->flags & 0x80) ? s->fall_g : 2.3f) * tk;
+        dy += s->vy * tk;
+    }
+    /* Actions 94/97 set their airborne flag two animation frames BEFORE their
+     * upward drive. GU's ground contact is already true during this interval,
+     * and drive_step deliberately has a zero-displacement first tick. Neither
+     * is a landing. Once lifted, normal downward contact ends the leap. */
+    if (!s->air_lifted && dy<=0 && (s->vert>0 || launch_pending(s))) return 0;
+    pos_of(p)[1] += dy;
+    if (dy>0 || pos_of(p)[1]>MS_GROUND_Y(p)+0.01f) s->air_lifted=1;
+    return dy <= 0 && MS_LANDED(p, 0.0f, 0);
+}
+
+/* ------------------------------------------------------------------------------------------------ pin */
+
+static void pin_end(uint8_t *p, struct ms_state *s)
+{
+    ms_monster_pin_end(p);
+    s->pin_mon = 0; s->flags &= ~0x10u;
+    if (pos_of(p)[1] > MS_GROUND_Y(p) + 30) { s->air = 0; set_air(p, s); }
+}
+
+static void pin_start(uint8_t *p, struct ms_state *s)
+{
+    uint8_t *m = s->pin_pending;
+    if (!em_alive(m, p)) {
+        s->pin_pending = 0;
+        s->pin_mon = 0;
+        s->flags &= ~0x10u;
+        logf("msport: pending pin target removed: pin cancelled");
+        MS_SET_ACTION(p, 0x10, (s->flags & 0x8000) ? 156 : 100, 0);
+        return;
+    }
+    uint8_t *r = em_rec(m);
+    float *q = pos_of(p);
+    s->pin_pending = 0;
+    s->pin_mon = m; s->flags |= 0x10;
+    if (!ms_monster_pin_begin(p,m)) {
+        s->pin_mon=0;s->flags&=~0x10u;
+        MS_SET_ACTION(p,0x10,(s->flags&0x8000)?156:100,0);
+        return;
+    }
+    for (int i = 0; i < 3; i++) s->pin_off[i] = q[i] - FIELD(float, r, 0x40 + 4 * i);
+    s->pin_yaw_m = FIELD(uint16_t, r, 0x54); s->pin_yaw_p = FIELD(uint16_t, p, 0xfec);
+    s->air = 0; s->att = 0;
+    s->pin_hold = PIN_HOLD; s->pin_cd = 0; s->qte = 0;
+    logf("msport: Magnetic Pin on monster %x (em %u)", (uint32_t)(uintptr_t)m, FIELD(uint8_t, m, 0xb5f4));
+    MS_SET_ACTION(p, 0x10, 98, 0);
+}
+
+/* The hunter rides the owned monster restraint; 99 = the QTE: X / A
+ * presses (one per 4 ticks) add 4 to the bar and the hold; 70 -> the finisher (105 / 157 when the pin came from
+ * Impact, flag 0x8000), the hold out -> 100 / 156. Returns 1 when the action changed */
+static int pin_tick(uint8_t *p, struct ms_state *s, float tk, uint32_t no)
+{
+    uint32_t imp = (s->flags & 0x8000) != 0;
+    if (!em_alive(s->pin_mon, p) || !ms_monster_pin_valid(p,s->pin_mon)) {
+        logf("msport: pinned monster gone");
+        pin_end(p, s);
+        if (no == 105 || no == 157) return 0;
+        MS_SET_ACTION(p, 0x10, imp ? 156 : 100, 0);
+        return 1;
+    }
+    uint8_t *r = em_rec(s->pin_mon);
+    uint16_t dyaw = (uint16_t)(FIELD(uint16_t, r, 0x54) - s->pin_yaw_m);
+    float a = dyaw * MS_U16_RAD, c = cosf_gu(a), sn = sinf_gu(a), *o = s->pin_off, *q = pos_of(p);
+    q[0] = FIELD(float, r, 0x40) + o[0] * c + o[2] * sn;
+    q[1] = FIELD(float, r, 0x44) + o[1];
+    q[2] = FIELD(float, r, 0x48) + o[2] * c - o[0] * sn;
+    face(p, (uint16_t)(s->pin_yaw_p + dyaw));
+    if (no != 99) return 0;
+    MS_IFRAMES(p, 8.0f, 1);                             /* MHF: P+0x4ee = 4 ticks while pinned */
+    s->pin_cd -= tk; s->pin_hold -= tk;
+    if ((FIELD(uint16_t, p, 0x13f8) & (PAD_U | PAD_R)) && s->pin_cd < 1) {
+        s->pin_cd = 4; s->qte += 4; s->pin_hold += 4;
+        if (s->pin_hold > PIN_HOLD_MAX) s->pin_hold = PIN_HOLD_MAX;
+    }
+    if (s->qte >= QTE_WIN) {
+        logf("msport: pin QTE success: Pin Finisher");
+        MS_SET_ACTION(p, 0x10, imp ? 157 : 105, 0);
+        return 1;
+    }
+    if (s->pin_hold > 0) return 0;
+    logf("msport: pin over (QTE %d)", (int)s->qte);
+    pin_end(p, s);
+    MS_SET_ACTION(p, 0x10, imp ? 156 : 100, 0);
+    return 1;
+}
+
+/* ------------------------------------------------------------------------------------------------ actions */
+
+static const struct ms_action *find(uint32_t no)
+{
+    for (uint32_t i = 0; i < sizeof ms_actions / sizeof ms_actions[0]; i++)
+        if (ms_actions[i].no == no) return &ms_actions[i];
+    return 0;
+}
+
+float ms_motion_start(uint8_t *p,uint32_t motion)
+{
+    if (FIELD(uint16_t,p,0x2506)!=0x10) return 0;
+    const struct ms_action *a=find(FIELD(uint16_t,p,0x250a));
+    unsigned step=FIELD(uint8_t,p,5);
+    if (!a || !step || step>a->nsteps) return 0;
+    const struct ms_step *st=&ms_steps[a->step0+step-1];
+    return st->kind>=3 && 5000u+st->mot==motion ? (float)st->start : 0;
+}
+
+static float drive(uint32_t v) { return (float)(int8_t)(uint8_t)v; }
+
+static void event(uint8_t *p, struct ms_state *s, const struct ms_event *e, int i)
+{
+    uint32_t v = e->prm;
+    s->fired |= 1u << i;
+    switch (e->id) {
+    case 1: if (v & 1) set_air(p, s); s->end_on_land = (v & 2) != 0; break;   /* airborne / ends on landing */
+    case 2: case 24: break;             /* drawn (set at the start); guard level 5 (class 5 = GS's guard rules) */
+    case 3: case 42: case 43: arm(p, s, e->hit); break; /* attack; special #11; #8 on the pinned monster */
+    case 4:                                             /* special: 82 / 84's #1 = the marker shot */
+        arm(p, s, e->hit);
+        if (s->action == 82 || s->action == 84) marker_shot(p, s);
+        break;
+    case 44: break;                     /* #8 again for the pinned monster's non-host side (S: multiplayer) */
+    case 7: case 8: {                   /* i-frames (ticks), 8 with Evasion's +5 / +10 (prm9 / prm10) */
+        float n = (float)v;
+        if (e->id == 8) { int l = MS_EVASION(p, 0x1f); n += l >= 2 ? 10 : l == 1 ? 5 : 0; }
+        MS_IFRAMES(p, 2 * n, 0);
+        keep_end(p, s, "event 7 / 8", s->action); s->if_given = n;
+        static int s_if;                                /* the maintainer, after test 14: "R + Y / A / X / B have no
+                                                           i-frames, unlike MHF-ZZ": MHF's are 7 ticks (+5 / +10 with
+                                                           Evasion +1 / +2: Capcom's chart's 17 = +2) */
+        if (s_if++ < 30) logf("msport: i-frames %d ticks in action %u (event %u, GU timer %d/60 s)", (int)n, s->action,
+                              e->id, (int)FIELD(float, p, 0x2b40));
+        break; }
+    case 9:                             /* i-frames >= 2 ticks every tick of this action (keep_end: until 7 / 8 or
+                                           the next action change, C) */
+        if (!s->keep_if) {
+            static int s_k;
+            if (s_k++ < 40) logf("msport: event-9 i-frame keep on in action %u (frame %d)", s->action,
+                                 (int)MS_FRAME(p));
+            s->keep_t = 0; s->keep_no = s->action;
+        }
+        s->keep_if = 1;
+        break;
+    case 11: MS_STAMINA(p, -150.0f, 0); break;          /* MHF 75 = a roll (GU 150) */
+    case 45: MS_STAMINA(p, -60.0f, 0); break;           /* MHF prm80 30 */
+    case 12: MS_SHAKE(p, 0xf, 0); break;                /* S: GU preset 0xf for MHF's presets */
+    case 13: MS_MOT_SPEED(p) = v * 0.01f; break;
+    case 21:                            /* guard window: 0 open, 1 close, 2 / 3 close unless MHF's Guard skills 0x28 /
+                                           0x29 (GU's has-skill 14 / 15, S: Guard +1 / +2): f26 -> f28 / f30 */
+        if (v == 0) MS_BITS_SET(p, 0, MS_GUARDING, 0);
+        else if (!(v == 2 && (MS_HAS_SKILL(p, 14) || MS_HAS_SKILL(p, 15))) && !(v == 3 && MS_HAS_SKILL(p, 15)))
+            MS_BITS_CLEAR(p, 0, MS_GUARDING, 0);
+        break;
+    case 25: s->grav = (float)v; s->grav_t = 0; break;
+    case 26: s->flags |= 0x20; ms_sound_post(p, 4, 512 + 6); break;   /* charge start */
+    case 27: s->fwd = drive(v); s->fwd_n = 0; s->fwd_k = 1; break;
+    case 28: s->vert = drive(v); s->vert_n = 0; s->vert_k = 1; if (s->vert > 0) set_air(p, s); break;
+    case 29: s->curve = (uint8_t)((s->curve & 0xf0) | curve_bits(v)); break;
+    case 30: s->curve = (uint8_t)((s->curve & 0x0f) | curve_bits(v) << 4); break;   /* S: as 29's table */
+    case 31: s->flags |= 0x80; s->fall_g = v * 0.01f; break;
+    case 33: s->hold_v = (float)v; break;
+    case 36: s->att = 0; break;         /* attraction vector reset */
+    case 37: s->fwd = 0; s->fwd_n = 0; s->curve &= 0xf0; break;
+    case 38: s->vert = 0; s->vert_n = 0; s->curve &= 0x0f; break;
+    case 39:                            /* face the pinned monster */
+        if (s->pin_mon) {
+            uint8_t *r = em_rec(s->pin_mon);
+            float *q = pos_of(p);
+            uint32_t y = yaw_to(FIELD(float, r, 0x40) - q[0], FIELD(float, r, 0x48) - q[2]);
+            s->pin_yaw_p = (uint16_t)(y - (uint16_t)(FIELD(uint16_t, r, 0x54) - s->pin_yaw_m));
+            face(p, y);
+        }
+        break;
+    case 40: if (s->mode) s->flags |= 0x8000; else s->flags &= ~0x8000u; break;
+    default: {                          /* 6 (P+0x4f0, unknown), 17 (effect task), 41 (run toggle) */
+        static uint64_t s_seen;
+        if (!(s_seen & 1ull << e->id)) logf("msport: event %u (param %u) not run", e->id, v);
+        s_seen |= 1ull << e->id;
+    } }
+}
+
+static void start_step(uint8_t *p, struct ms_state *s, const struct ms_action *a, int k)
+{
+    const struct ms_step *st = &ms_steps[a->step0 + k];
+    FIELD(uint8_t, p, 5) = (uint8_t)(k + 1);
+    s->loops = 0; s->step_t = 0;
+    if (st->kind <= 2) {                        /* go to another action */
+        MS_SET_ACTION(p, 0x10, st->mot, 0);
+        return;
+    }
+    MS_SET_MOTION(p, 5000 + st->mot, (float)st->blend, (float)st->start);
+    if (k == 0) MS_SET_TABLE(p, st->table, 0); else MS_SET_TABLE_KEEP(p, st->table, 0, 1);
+    s->last_frame = (float)st->start;
+    for (int i = 0; i < a->nevents; i++) {
+        const struct ms_event *e = &ms_events[a->ev0 + i];
+        if (e->step == k && e->when == 0) event(p, s, e, i);
+    }
+}
+
+static void action_start(uint8_t *p, struct ms_state *s, const struct ms_action *a)
+{
+    ms_cancel_windows_reset(p);
+    uint32_t no = a->no;
+    float t[3], *q = pos_of(p);
+    keep_end(p, s, "action change", no);               /* MHF: 0x10a80a00 -> 0x10a80050 clears ext+0x284 (C) */
+    s->action = (uint16_t)no; s->fired = s->code_fired = 0;
+    s->action_clock = s->recovery_end = 0;
+    s->flags &= 0x1 | 0x10 | 0x40 | 0x1000 | 0x8000;
+    s->end_on_land = 0;
+    if (!IN(s_pin_keep, no)) {
+        s->gc_hits = 0; s->curve = 0;
+        s->fwd = s->vert = s->grav = s->grav_t = s->fall_g = s->hold_v = s->fwd_n = s->vert_n = 0;
+    }
+    if (no != 94 && no != 97) s->pin_pending = 0;
+    if (s->pin_mon && !IN(s_pinned, no)) pin_end(p, s);
+    if (!IN(s_attract, no)) { if (s->att) att_log(p, s, "action change"); s->att = 0; s->flags &= ~0x1000u; }
+    s->mode = a->mode;
+    if (IN(s_cost, no)) gauge_add(s, -BAR);
+    MS_ACTION_FLAGS(p, s->air || s->pin_mon ? 2 : 0, 1, 0);
+    ((void (*)(void *, uint32_t))MS_VT(p, 0x46c))(p, 1);
+    if (no == 78 || no == 79 || ((no == 59 || no == 73) && !ms_drawn(p)))
+        MS_DRAW_FLAG(p, 1);                             /* the draw attacks, as GS's (59: the sheathed jump's) */
+    switch (no) {
+    case 34: s->charge = 0; s->charge_lvl = 0; break;
+    case 58: case 61: case 62: case 68: case 71: case 72:
+        if (!marker(s, t)) { logf("msport: attraction without a marker"); break; }
+        face(p, yaw_to(t[0] - q[0], t[2] - q[2]));
+        s->att = 1; s->att_t = 0; s->flags |= 0x1000;
+        att_start(p, s, t);
+        s->att_all = 0; s->rail_t = 0; s->beam_t = 0; s->rail_n = 0;
+        s->att_mark = 0;                                /* att_carriers: fc5 7 at the marker at f10 */
+        set_air(p, s);
+        break;
+    case 66: case 67:                                   /* repulsion: face the marker, the motion pushes away */
+        if (marker(s, t)) face(p, yaw_to(t[0] - q[0], t[2] - q[2]));
+        s->rep_t = 2;                                   /* rep_posts at t2 */
+        break;
+    case 82: case 84: {                                 /* the shot: MHF's action start 0x103333a0 (C): the hunter
+                                                           takes the camera's yaw, the shot its 3-D view direction */
+        uint8_t *cm = MS_CAM_MGR, *cam = cm ? FIELD(uint8_t *, cm, 0x54) : 0;
+        float y = FIELD(uint16_t, p, 0xfec) * MS_U16_RAD;
+        s->aim_dir[0] = sinf_gu(y); s->aim_dir[1] = 0; s->aim_dir[2] = cosf_gu(y);
+        if (cam) {
+            float d[3], n;
+            for (int k = 0; k < 3; k++) d[k] = FIELD(float, cam, 0x60 + 4 * k) - FIELD(float, cam, 0x40 + 4 * k);
+            n = root(dot3(d, d));
+            face(p, yaw_to(d[0], d[2]));
+            if (n > 1) for (int k = 0; k < 3; k++) s->aim_dir[k] = d[k] / n;
+        }
+        break; }
+    case 163: case 164:
+        if (s->mag[s->mode] == 0 && s->mag_v[s->mode] >= MAG_READY) {
+            s->mag[s->mode] = 1; s->mag_v[s->mode] = MAG_TIME;
+            void *h = 0;
+            if (MS_FXQ_ON) { s->mz_on = 1; s->mz_mode = s->mode; s->mz_t = 0; s->mz_k = 0; }   /* magz_look */
+            else h = MS_EFFECT(p, MS_EFX_MAGNETISE);    /* GS's charge flash as the stand-in */
+            logf("msport: %s Magnetise on (effect %x)", s->mode ? "Impact" : "Cutting", (uint32_t)(uintptr_t)h);
+        }
+        break;
+    }
+    static int s_n;
+    if (s_n++ < 400) logf("msport: action %u (%s) gauge %d, Magnetise %u/%d", no, a->mode ? "Impact" : "Cutting",
+                          s->gauge, s->mag[s->mode], (int)s->mag_v[s->mode]);
+}
+
+static int step_done(uint8_t *p, struct ms_state *s, const struct ms_step *st)
+{
+    float f = MS_FRAME(p);
+    if (f + 0.5f < s->last_frame) s->loops++;   /* the motion looped */
+    s->last_frame = f;
+    switch (st->kind) {
+    case 3: return MS_MOTION_END(p) || (st->loops > 1 && s->loops >= st->loops);
+    case 4: return s->loops + 1 >= st->loops && MS_REACHED(p, (float)st->frame);
+    default: return 0;                          /* 5: hold */
+    }
+}
+
+/* hits MHF's code spawns (0x103339d0): the Guard Counter successes 57 / 76 / 77 special #5 / #6 / #7 at f32, the
+ * Finishing Slashes 152 / 154 / 155 special #10 after f38 when magnetised; the Magnetic Shock 5 x 3 task from 159 /
+ * 160 at f8 (step 0: 1031 / 1032) and 161 / 162 at the start of 1082 (step 1) */
+static void code_hits(uint8_t *p, struct ms_state *s, uint32_t no, int k)
+{
+    uint32_t hit = 0;
+    float f = 32;
+    if (!(s->code_fired & 2) && ((k == 0 && (no == 159 || no == 160) && MS_REACHED(p, 8.0f)) ||
+                                 (k == 1 && (no == 161 || no == 162)))) {
+        s->code_fired |= 2;
+        s->shock_on = 1; s->shock_k = 0; s->shock_t = 0;
+        logf("msport: Magnetic Shock 5 x 3 (action %u)", no);
+    }
+    if (s->code_fired & 1) return;
+    if (no == 57) hit = MS_HIT_SPECIAL_5;
+    else if (no == 76) hit = MS_HIT_SPECIAL_6;
+    else if (no == 77) hit = MS_HIT_SPECIAL_7;
+    else if ((no == 152 || no == 154 || no == 155) && s->mag[s->mode] == 1) { hit = MS_HIT_SPECIAL_10; f = 38; }
+    if (hit && MS_REACHED(p, f)) { s->code_fired |= 1; arm(p, s, hit); }
+}
+
+static int charge_tick(uint8_t *p, struct ms_state *s, float tk)   /* 34: 1 = released by overcharging */
+{
+    if (!(s->flags & 0x20)) return 0;
+    s->charge += tk;
+    if (!s->charge_lvl && s->charge >= CHARGE_T) {
+        s->charge_lvl = 1;
+        void *h = 0;                                    /* MHF: fc6 0x11 on bone 10, fc5 0x15 rising + rumble */
+        if (MS_FXQ_ON) fx_queue(p, s, MS_FXQ_CHARGED); else h = MS_EFFECT(p, MS_EFX_CHARGED);
+        ms_sound_post(p, 4, 512 + 7);                   /* MHF's level-up sound, not a camera shake */
+        logf("msport: Triple Strike charged (effect %x)", (uint32_t)(uintptr_t)h);
+    } else if (s->charge_lvl && s->charge >= CHARGE_OVER) {
+        s->charge_lvl = 0;
+        fx_queue(p, s, MS_FXQ_RELEASE);                 /* MHF fc6 0xe with the auto-release (0x10333d11) */
+        logf("msport: Triple Strike overcharged: released");
+        MS_SET_ACTION(p, 0x10, 36, 0);
+        return 1;
+    }
+    return 0;
+}
+
+static void finish(uint8_t *p, struct ms_state *s, const struct ms_action *a, int k)
+{
+    if (k + 1 < a->nsteps) { start_step(p, s, a, k + 1); return; }
+    if (s->pin_mon) pin_end(p, s);
+    if (s->air) { s->air = 0; s->att = 0; MS_MOVE_STATE(p, 0); }   /* GU's ground step starts its fall */
+    unsigned recovery = ms_recovery_frames(a->no);
+    if (recovery) {
+        if (s->recovery_end == 0) {
+            s->recovery_end = s->action_clock + recovery;
+            logf("ms-recovery: action %u tail %u frames at clock %d",a->no,recovery,(int)s->action_clock);
+        }
+        if (s->action_clock < s->recovery_end) return;
+        logf("ms-recovery: action %u ready at clock %d",a->no,(int)s->action_clock);
+    }
+    static int s_n;
+    if (s_n++ < 100) logf("msport: action %u done: drawn neutral", a->no);
+    MS_TO_NEUTRAL(p, 0, 4, 0, 0, 0, 0);
+}
+
+void ms_act(uint8_t *p)
+{
+    uint32_t no = FIELD(uint16_t, p, 0x250a);
+    struct ms_state *s = ms_of(p);
+    if (no == MS_RELEASE) {                     /* MHF shared 208: the charge released */
+        logf("msport: Triple Strike released at f%d, A %s, charge %d/%d ticks (level %u)", (int)MS_FRAME(p),
+             (FIELD(uint16_t, p, 0x13f4) & PAD_R) ? "held" : "up", (int)s->charge, CHARGE_T, s->charge_lvl);
+        if (!s->charge_lvl) fx_queue(p, s, MS_FXQ_EARLY);   /* MHF fc6 0x13: released before level 1 */
+        MS_SET_ACTION(p, 0x10, s->charge_lvl ? 35 : 36, 0);
+        return;
+    }
+    if (no == MS_GC_HIT) {                      /* MHF shared 207: the Guard Counter by guarded hits */
+        MS_SET_ACTION(p, 0x10, s->gc_hits >= 3 ? 77 : s->gc_hits == 2 ? 76 : 57, 0);
+        return;
+    }
+    const struct ms_action *a = find(no);
+    if (!a) {
+        logf("msport: action %u has no Magnet Spike data: neutral", no);
+        ((void (*)(void *))MS_VT(p, 0x2f4))(p);
+        return;
+    }
+    uint32_t step = FIELD(uint8_t, p, 5);
+    if (step == 0) { action_start(p, s, a); start_step(p, s, a, 0); return; }
+    int k = (int)step - 1;
+    if (k >= a->nsteps) return;
+    if (s->recovery_end > 0) { finish(p,s,a,k); return; }
+    const struct ms_step *st = &ms_steps[a->step0 + k];
+    float tk = tick_len(p), *q = pos_of(p);
+    s->step_t += tk;
+    for (int i = 0; i < a->nevents; i++) {
+        const struct ms_event *e = &ms_events[a->ev0 + i];
+        if (e->step != k || (s->fired & 1u << i)) continue;
+        if ((e->when == 1 && s->loops >= e->loop && MS_REACHED(p, (float)e->frame)) ||
+            (e->when == 3 && s->charge_lvl >= e->lvl)) event(p, s, e, i);
+    }
+    code_hits(p, s, no, k);
+    if (s->pin_pending && (no == 94 || no == 97)) { pin_start(p, s); return; }
+    if (s->pin_mon && IN(s_pinned, no) && pin_tick(p, s, tk, no)) return;
+    if (no == 34 && charge_tick(p, s, tk)) return;
+    if (s->keep_if) { MS_IFRAMES(p, 4.0f, 0); s->keep_t += tk; }   /* MHF 0x1032f880: >= 2 ticks, MS actions only */
+    if (s->hold_v > 0) {
+        s->hold_v -= tk;
+        FIELD(float, p, 0x1010) = FIELD(float, p, 0x1014) = FIELD(float, p, 0x1018) = 0;
+    }
+    if (s->fwd != 0 && !s->pin_mon) {                   /* MHF: pos += R(yaw) (0, 0, drive) */
+        float d = drive_step(s->fwd, s->curve & 0xf, &s->fwd_n, &s->fwd_k, tk);
+        float y = FIELD(uint16_t, p, 0xfec) * MS_U16_RAD;
+        q[0] += sinf_gu(y) * d; q[2] += cosf_gu(y) * d;
+    }
+    s->grav_t += tk;
+    int landed = 0;
+    if (!s->pin_mon) {
+        if (s->att) landed = attraction(p, s, tk);
+        else if (s->air) landed = fall(p, s, tk);
+    }
+    if (landed) {
+        if (s->att) att_log(p, s, "landed");
+        s->air = 0; s->att = 0; s->vy = 0; s->flags &= ~0x1000u;
+        logf("msport: landed in action %u", no);
+        if (no == 59 || no == 73) {                     /* test 10: the falling attacks went back to idle on landing;
+                                                           MHF's next actions are their landings (60: motion 1015
+                                                           after 59's 1016, 74: 1014 after 73's 1017, both a shake) */
+            MS_SET_ACTION(p, 0x10, no + 1, 0);
+            return;
+        }
+        if (s->end_on_land || st->kind == 5) { finish(p, s, a, k); return; }
+    }
+    if (st->kind == 5 && !s->att && !s->air && !s->pin_mon && s->step_t > 15) {
+        logf("msport: action %u: hold step %d with nothing driving it: done", no, k);
+        finish(p, s, a, k);
+        return;
+    }
+    if (step_done(p, s, st)) finish(p, s, a, k);
+}
