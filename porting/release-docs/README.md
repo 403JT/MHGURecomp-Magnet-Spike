@@ -30,6 +30,8 @@ MHGU 1.4.0 is the game's version, not an MHGURecomp release number.
 - Forty Frontier weapon models, reused across related families. Upgrades within
   a family retain their model.
 - Frontier weapon sounds, a custom weapon icon/HUD, and tuned damage values.
+- Great Sword baseline sharpness at every upgrade level, with native sharpening
+  and Sharpness +1/+2 support. The pre-release sharpness-cap bug is fixed.
 - Added combo-end commitment: 0.30–0.50 seconds at selected finishers, including
   the right-face-button combo.
 

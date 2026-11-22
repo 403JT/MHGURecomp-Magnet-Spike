@@ -45,6 +45,10 @@ Close the game and make a new save backup. Move the old **Magnet-Spike** folder
 out of `mods`, then put the new version in its place. Keep only one copy enabled.
 Read the new version's notes before loading a save from an older mod version.
 
+The `sharpness-1` draft update fixes crafted weapons being capped at red/low
+sharpness. Restart with the updated mod; existing weapons use their correct
+sharpness automatically. Recrafting or editing your save is unnecessary.
+
 ## Remove or roll back
 
 This alpha has no automatic migration for saves that own Magnet Spike equipment.

@@ -157,6 +157,15 @@ def main():
         if struct.unpack_from('<I', img, site)[0] != old:
             raise RuntimeError(f'Unexpected original instruction at {site:x}')
         record(site, struct.pack('<I', new))
+    # cEquipBoxData's sharpness-level getter (0xdb900) accepts only the native
+    # melee equipment types. Type 12 otherwise returns zero before reading its
+    # level row, capping every Magnet Spike at 150 points in hunter stat 0xe.
+    # Add only bit 12, as the existing element getters do for the same new type.
+    sharpness_site = 0xdb91c
+    old = struct.unpack_from('<I', img, sharpness_site)[0]
+    if old != 0xe30c2780:
+        raise RuntimeError('Unexpected sharpness equipment-type mask')
+    record(sharpness_site, struct.pack('<I', build.movw_imm(old, 0xd780)))
     (moddir / 'exefs' / (build.MAIN_BUILD_ID + '.ips')).write_bytes(b'IPS32' + b''.join(records) + b'EEOF')
     shutil.copytree(MS / 'romfs', moddir / 'romfs', dirs_exist_ok=True)
     (OUT / 'symbols.json').write_text(json.dumps(final, indent=2) + '\n', encoding='utf-8')
@@ -164,6 +173,7 @@ def main():
         'status': 'experimental build; gameplay verification is recorded separately', 'hooks': len(hooks),
         'patch_records': len(records), 'weapon_count': tree['counts']['base']-1,
         'smithy_tree': True, 'balance_revision': balance['policy']['revision'],
+        'sharpness_revision': 'sharpness-1',
         'balance_policy_sha256':balance['policy_sha256'],
         'full_port_complete': False}, indent=2) + '\n', encoding='utf-8')
     print(f'Built experimental smithy-tree module: {len(hooks)} hooks, {len(records)} verified patch sites.')

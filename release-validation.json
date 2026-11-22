@@ -1,14 +1,106 @@
 {
   "mod_version": "v0.1.0-alpha.1",
-  "build_revision": "recovery-1",
+  "build_revision": "sharpness-1",
   "game": "MHGU 1.4.0",
-  "language": "English",
   "runtime": "official MHGURecomp 0.18.0 Windows x64",
-  "runtime_download_sha256": "f29342e8d58a4dda1e1ca5aa580dc048834cc3ea53c633c99e83df07cc509ce6",
-  "runtime_executable_sha256": "286be3af1fe5aee7649bb548c33d550b8d52e97f931eafc9db6d6c030d6571b7",
+  "language": "English",
   "module_sha256": "5041e364e88dc2cf0dde68141085b7ea95fe2b5103ec43eb35b82a07bda3409d",
   "normal_builtin_mod_loader": true,
+  "runtime_executable_sha256": "286be3af1fe5aee7649bb548c33d550b8d52e97f931eafc9db6d6c030d6571b7",
+  "change": "One equipment-type mask admits type12 to the native sharpness-level getter.",
+  "code_module_and_all_assets_identical_to_recovery_1": true,
   "tests": [
+    {
+      "scenario": "Native ARM sharpness getters, colours, skills and Whetstone restoration",
+      "passed": true,
+      "levels": 959,
+      "Handicraft_cases": 2877,
+      "restoration_calls": 17262,
+      "checks": {
+        "only_one_added_IPS_record": true,
+        "mask_adds_only_equipment_type_12": true,
+        "module_and_all_assets_byte_identical": true,
+        "all_959_native_GS_and_MS_sharpness_levels_match": true,
+        "old_getter_reproduces_zero_sharpness_level": true,
+        "Handicraft_0_1_2_native_calculation_and_cap": true,
+        "all_native_colours_match_the_original_GS_bars": true,
+        "native_whetstone_recovers_from_red_to_full_without_overfill": true,
+        "every_other_equipment_type_keeps_original_result": true
+      }
+    },
+    {
+      "scenario": "Real collision and ordinary Whetstone use",
+      "passed": true,
+      "checks": {
+        "normal_exit": true,
+        "correct_starting_sharpness": true,
+        "no_fatal": true,
+        "source_saves_unchanged": true,
+        "candidate_unchanged": true,
+        "muted": true,
+        "normal_whetstone_restored_lost_sharpness": true
+      },
+      "weapon_id": 1,
+      "level": 11,
+      "starting_sharpness": {
+        "current": 400,
+        "maximum": 400,
+        "colour": 5
+      },
+      "loss_and_recovery": {
+        "before": {
+          "current": 399,
+          "maximum": 400,
+          "colour": 5
+        },
+        "after": {
+          "current": 400,
+          "maximum": 400,
+          "colour": 5
+        },
+        "normal_item_buttons": "Y to sheathe, mouse wheel to select the sole pouch item, Y to use Whetstone"
+      }
+    },
+    {
+      "scenario": "Previously red-capped family",
+      "passed": true,
+      "checks": {
+        "normal_exit": true,
+        "correct_starting_sharpness": true,
+        "no_fatal": true,
+        "source_saves_unchanged": true,
+        "candidate_unchanged": true,
+        "muted": true
+      },
+      "weapon_id": 4,
+      "level": 1,
+      "starting_sharpness": {
+        "current": 300,
+        "maximum": 300,
+        "colour": 4
+      }
+    },
+    {
+      "scenario": "Previously crafted equipment, no weapon-entry edit",
+      "passed": true,
+      "checks": {
+        "normal_exit": true,
+        "correct_starting_sharpness": true,
+        "no_fatal": true,
+        "source_saves_unchanged": true,
+        "candidate_unchanged": true,
+        "muted": true
+      },
+      "weapon_id": 104,
+      "level": 2,
+      "starting_sharpness": {
+        "current": 400,
+        "maximum": 400,
+        "colour": 5
+      }
+    }
+  ],
+  "historical_recovery_1_smoke_tests": [
     {
       "scenario": "Equipped Magnet Spike: startup, normal right-button combo and finisher recovery",
       "passed": true,
@@ -41,16 +133,12 @@
       }
     }
   ],
-  "payload_exactly_matches_installed_recovery_1": true,
-  "prior_checks": {
-    "ARM_recovery_checks": 441,
-    "native_command_rows": 129,
-    "recovery_validation_gates": 19
-  },
+  "historical_test_scope": "Before this single-mask fix; module and assets are byte-identical. Only the current sharpness cases above used the updated IPS.",
   "limits": [
     "These are focused smoke tests, not a complete hunt campaign.",
     "No fresh smithy transaction was performed on the official0.18.0 runtime in these smoke tests; prior crafting evidence used the same guest game and mod code.",
     "Multiplayer, other languages/platforms and general mod combinations are not validated.",
-    "Long-hunt, faint/capture/multiple-large-monster coverage remains incomplete."
+    "Long-hunt, faint/capture/multiple-large-monster coverage remains incomplete.",
+    "Focused sharpness correction, no new full-hunt or damage-balance guarantee."
   ]
 }

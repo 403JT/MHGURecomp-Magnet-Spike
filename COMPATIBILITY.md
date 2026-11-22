@@ -9,6 +9,9 @@
   Its built-in mod loader passed an equipped-weapon combo/recovery test and a
   clean-save town load with no preinjected Magnet Spike equipment. Both tests
   were muted and used disposable save copies. See `release-validation.json`.
+  The sharpness correction additionally passed existing-crafted-weapon reload,
+  correct blue/white capacity, and normal Whetstone use after a real collision
+  on that official runtime. All test games were muted; original saves were unchanged.
 
 The mod uses the normal `mods/<folder>/exefs` and `romfs` loader. It does not
 require a modified MHGURecomp executable or a mandatory external launcher.
