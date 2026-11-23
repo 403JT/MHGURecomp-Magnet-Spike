@@ -68,8 +68,15 @@ def target_settings(target):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--target', choices=('recomp', 'ryujinx'), default='recomp')
+    parser.add_argument('--freeze-diagnostics', action='store_true',
+                        help='Separate Recomp-only logging build; leaves the release output unchanged')
     args = parser.parse_args(argv)
     out, defines = target_settings(args.target)
+    if args.freeze_diagnostics:
+        if args.target != 'recomp':
+            raise ValueError('Freeze diagnostics target the public Recomp build only')
+        out = OUT / 'freeze-diagnostics'
+        defines.append('MS_FREEZE_DIAGNOSTICS')
     audit()
     if not (MS / 'gen/ms_data.inc').is_file():
         raise RuntimeError('Run build_assets.py --native-reticle first')

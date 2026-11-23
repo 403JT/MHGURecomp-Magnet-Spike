@@ -23,6 +23,37 @@ static char names[MS_TREE_BASE_COUNT][3][64];
 static unsigned initialized;
 static uint32_t box_type(void) { return MS_TYPE; }
 
+/* English display names requested for these MS families and upgrade variants.
+ * Native GS records/text and all nonmatching MS names remain unchanged. */
+static const struct {
+    unsigned id;
+    const char *original, *replacement;
+} name_overrides[] = {
+    {19, "Avidya Great Sword", "Avidya Magnet Spike"},
+    {38, "Tigrex Great Sword", "Tigrex Magnet Spike"},
+    {69, "Skeletal Great Sword", "Skeletal Magnet Spike"},
+    {69, "Infernal Great Sword", "Infernal Magnet Spike"},
+    {73, "Alatreon Great Sword", "Alatreon Magnet Spike"},
+    {75, "Rusted Great Sword", "Rusted Magnet Spike"},
+    {78, "Worn Great Sword", "Worn Magnet Spike"},
+    {78, "Aged Great Sword", "Aged Magnet Spike"},
+    {111, "Gold Great Sword", "Gold Magnet Spike"},
+    {112, "Silverwing Great Sword", "Silverwing Magnet Spike"},
+    {115, "Elderfrost Great Sword", "Elderfrost Magnet Spike"},
+    {130, "Research Great Sword", "Research Magnet Spike"},
+    {130, "Discovery Great Sword", "Discovery Magnet Spike"},
+};
+static const char *renamed_name(unsigned id,const char *source)
+{
+    for (unsigned i=0;i<sizeof name_overrides/sizeof name_overrides[0];i++) {
+        if (name_overrides[i].id!=id) continue;
+        const char *a=source,*b=name_overrides[i].original;
+        while (*a && *a==*b) {a++;b++;}
+        if (!*a && !*b) return name_overrides[i].replacement;
+    }
+    return 0;
+}
+
 static const char *tree_name(uint8_t *r,unsigned lv,int by_level)
 {
     unsigned id=FIELD(uint32_t,r,4);
@@ -32,6 +63,8 @@ static const char *tree_name(uint8_t *r,unsigned lv,int by_level)
     name_t get=(name_t)(*(uint32_t **)gs)[(by_level?0xbc:0x3c)/4];
     const char *source=get(gs,lv);
     if (!source) return "Magnet Spike";
+    const char *replacement=renamed_name(id,source);
+    if (replacement) return replacement;
     unsigned k;
     for (k=0;k<3;k++) if (name_sources[id][k]==source) return names[id][k];
     for (k=0;k<3 && name_sources[id][k];k++);

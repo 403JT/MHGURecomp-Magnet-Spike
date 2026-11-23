@@ -1,4 +1,4 @@
-# Magnet Spike controls — v0.1.0-alpha.1
+# Magnet Spike controls — v0.1.0-alpha.5
 
 Craft and equip an **MS** weapon from the Magnet Spike smithy category.
 This guide describes the mod's inputs. The 160 converted action
@@ -26,7 +26,7 @@ time. Charge holding and the earlier combo attacks do not receive this delay.
 ## Crafting and upgrading
 
 Magnet Spike has its own weapon category on the smithy's third category page.
-Names have an **MS** prefix. Its 136 weapon families copy the matching Great
+Most names have an **MS** prefix; the 13 corrected names instead end in **Magnet Spike** (see [NAME_CHANGES.md](NAME_CHANGES.md)). Its 136 weapon families copy the matching Great
 Sword's materials, costs, unlocks and upgrade branches. Raw attack is 95% of the matching Great Sword,
 with separate move damage tuning. Other equipment stats retain that baseline. Upgrade your
 Magnet Spike through the normal equipment upgrade menu. A family retains its
@@ -60,9 +60,10 @@ covered by the same checks.
 | --- | --- |
 | Draw weapon while standing | X |
 | Moving Cutting draw attack | Move + X while sheathed |
-| Impact horizontal draw attack | X+A while sheathed |
+| Draw into Impact Guard | Hold R, press X+A while sheathed |
 | Sheathe | Y while drawn, outside a combo |
 | Ordinary roll | B, without aiming or holding R |
+| Sprinting roll with weapon sheathed | Hold R + movement, then B |
 | Switch Cutting / Impact | Minus from drawn neutral |
 | Transform attack | Minus during a horizontal attack's follow-up window |
 | Moving / post-roll attack variants | Move or roll, then X or A |
@@ -107,7 +108,7 @@ automatically.
 | Triple Strike 2 | A after Triple Strike 1 |
 | Triple Strike 3, uncharged | Start the third A input, then release before the charge cue |
 | Charged Strike | A → A → hold A on the third input; release at the charge flash/sound |
-| Horizontal Swipe 1 | X+A while sheathed; or A after Overhead Horizontal |
+| Horizontal Swipe 1 | A after Overhead Horizontal |
 | Horizontal Swipe 2 | A after Horizontal 1 |
 | Overhead Horizontal | X+A after Horizontal 2 |
 | Suplex from that chain | X+A after Overhead Horizontal |
@@ -124,7 +125,9 @@ automatically.
 Holding the Triple Strike charge too long overcharges it and automatically
 releases the weaker third strike. Use the charge cue rather than a fixed time
 from the first attack. Stationary A and walking A start different Impact routes.
-For the horizontal chain, draw with X+A, then A → X+A → X+A.
+The previous guide's plain sheathed X+A draw was not reproduced with Guild
+style in the latest checks. R+X+A while sheathed draws into Impact Guard;
+the same chord while drawn remains Magnetic Assault.
 
 B can roll out of the Triple Strike charge during its early and
 late cancel windows. There is a short blocked interval between them. Moving
@@ -144,8 +147,7 @@ the stick uses the drawn-movement cancel where that window permits it.
 
 Attraction and repulsion each need stamina and **one gauge bar**. Distance is
 measured to the attached marker, so the target can move into or out of range.
-The installed build uses GU's scope art; use the distance requirements rather
-than expecting Frontier's coloured reticle.
+Aiming keeps the normal third-person camera and uses the native pink Insect Glaive cursor. Attraction and repulsion still use the existing distance requirements.
 
 ## Magnetic Pin and finisher — either form
 
@@ -172,10 +174,18 @@ The five-bar movement gauge and each form's Magnetise charge are separate.
 Most magnetic R attacks/evasions spend a gauge bar; switching form and a
 marker shot do not spend one.
 
+## Restored opening animations
+
+The late Double Slash **X+A** follow-up now completes instead of stalling.
+Three other attacks play restored lead-ins, delaying attack onset roughly
+0.75–0.85 s relative to alpha.3. Existing input windows, damage values and end
+recovery durations are unchanged. See [MOTION_FIXES.md](MOTION_FIXES.md).
+
 ## Validation scope
 
-Major normal-control paths, live pins, Magnetise and Cutting guard/counter have
-automated gameplay evidence. All 160 action entries start in smoke tests;
-every listed follow-up window, alternate lead-in and camera/style option has
-not been individually playtested. This remains an experimental port; see
-[README.md](README.md) and [COMPATIBILITY.md](COMPATIBILITY.md) for the tested scope.
+Fresh merged-build tests cover both forms' camera/cursor, pin shots and
+attraction attacks, ordinary inputs into the previously stalled follow-up,
+and all four restored motion timelines. The wider controls guide also reflects
+historical tests; not every branch or all 160 entries was rerun on this build.
+Connected multiplayer and a new full hunt remain untested. See
+[COMPATIBILITY.md](COMPATIBILITY.md) and release-validation.json.

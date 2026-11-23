@@ -101,9 +101,9 @@ struct ms_state {
     uint32_t fx_mot;                /* MHF effect posts (ms_act.c fx_posts): the motion they were armed for */
     uint8_t fx_done[32];            /* rows of ms_fxposts posted in this motion run (from fx_first) */
     uint16_t fx_first;              /* the motion's first row (ms_fxposts is sorted by motion) */
-    uint8_t aim_view;               /* GU's aim view (camera + scope HUD) started by aim_view() */
-    uint8_t aim_log;                /* "aim tick" log lines left after "aim view on" */
-    float aim_yaw, aim_pitch;       /* the aim look (ms_act.c aim_look): yaw in u16 units (hunter-yaw sense, the
+    uint8_t aim_view;               /* local native Glaive cursor active; normal camera retained */
+    uint8_t aim_log;                /* reserved: retain the established per-hunter state layout */
+    float aim_yaw, aim_pitch;       /* normal camera's look (ms_act.c aim_look): yaw in u16 units (hunter-yaw sense, the
                                        camera looks along it), pitch in u16 units (GU's +0x2714 sense) */
     float fxq_t[MS_FXQ_MAX];        /* queued event posts: frames left (0 = free slot) */
     uint16_t fxq_id[MS_FXQ_MAX];
@@ -275,6 +275,7 @@ void ms_guarded(uint8_t *p, uint32_t level, uint8_t *info, int32_t *dmg);   /* m
 int ms_invuln(uint8_t *p);          /* ms_act.c: slot 44 */
 void ms_after_update(uint8_t *p);   /* ms_act.c: slot 45 (+0xb4) */
 void ms_aim_cam(uint8_t *p, void *out, int k);    /* ms_act.c: slot 260 (+0x410) */
+int ms_aim_cursor(uint8_t *p);                   /* slot 342 (+0x558): local native Glaive cursor */
 void ms_reticle(int frame);         /* ms_class.c: the scope HUD shows MHF's reticle frame (-1 = GU's) */
 void ms_init(void);                 /* ms_class.c, from module_init */
 void ms_text_loaded(uint8_t *m, const char *name, uint32_t lang);           /* ms_class.c, from items.c */

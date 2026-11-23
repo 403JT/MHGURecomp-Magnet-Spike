@@ -1,4 +1,4 @@
-# Install v0.1.0-alpha.2
+# Install v0.1.0-alpha.5
 
 ## Before installing
 
@@ -14,7 +14,7 @@
 
 ## Install
 
-1. Download `Magnet-Spike-v0.1.0-alpha.2.zip` from GitHub Releases.
+1. Download `Magnet-Spike-v0.1.0-alpha.5.zip` from GitHub Releases.
 2. Extract it and copy its **Magnet-Spike** folder into MHGURecomp's **mods** folder:
 
    ```text
@@ -33,7 +33,7 @@
 3. In the normal MHGURecomp settings, enable **Magnet-Spike** in the Mods tab if
    needed. Save the settings and restart the game.
 4. Continue your own hunter. Visit the smithy and select **Magnet Spike** on the
-   third weapon-category page. Craft an **MS** weapon using its listed materials.
+   third weapon-category page. Craft a Magnet Spike using its listed materials (most names have an **MS** prefix).
    Recipes follow the normal progression/unlock rules.
 
 Do not copy anything into `data/exefs` or `data/romfs`. The game files stay intact.
@@ -45,10 +45,10 @@ Close the game and make a new save backup. Move the old **Magnet-Spike** folder
 out of `mods`, then put the new version in its place. Keep only one copy enabled.
 Read the new version's notes before loading a save from an older mod version.
 
-Alpha.2 includes the cumulative feedback fixes described in
+Alpha.5 includes the cumulative feedback fixes described in
 [FEEDBACK_FIXES.md](FEEDBACK_FIXES.md). Existing Magnet Spike weapon IDs,
 recipes, stats and models are preserved; no save editing or recrafting is
-needed when updating from alpha.1.
+needed when updating from an earlier Magnet Spike Recomp alpha.
 
 This release also includes the earlier fix for crafted weapons being capped at red/low
 sharpness. Restart with the updated mod; existing weapons use their correct
@@ -69,3 +69,8 @@ without the mod. Selling/removing gear as a migration path has not been validate
 Check for an extra nested folder, verify that the mod is enabled, restart, and
 check the game's `log.txt` for `[mods]` lines. Confirm MHGU 1.4.0 and English.
 If you changed MHGURecomp's files/mods location, use that location's `mods` folder.
+
+This combined release includes the 13 weapon-name corrections, Glaive-style
+camera/cursor and all four alpha.4 motion-length corrections. The reproduced
+Double Slash follow-up stall is fixed; three restored lead-ins make their
+attacks start later. Read [RELEASE_NOTES.md](RELEASE_NOTES.md) before updating.

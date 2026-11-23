@@ -88,20 +88,65 @@ static float tick_len(uint8_t *p) { return FIELD(float, p, 0x1c) * 0.5f; }
 
 /* diagnostic (tests): every change of the action, its step, the body motion, the weapon's motion (part 0 object
  * +0x23a0, its +0x4b4 = list << 8 | slot) and the command table (+0x24ac id, +0x24a8 table, +0x24f0 the class list) */
+#ifdef MS_FREEZE_DIAGNOSTICS
+static struct ms_trace_state {
+    struct ms_state *owner;
+    uint8_t *p;
+    uint32_t last[5];
+    float heartbeat;
+    uint8_t initialized;
+} s_trace[MS_PLAYERS+1];
+#endif
 static void trace(uint8_t *p)
 {
+#ifdef MS_FREEZE_DIAGNOSTICS
+    struct ms_state *s=ms_find(p);
+    if (!s) return;
+    struct ms_trace_state *t=0,*free_=0;
+    for (unsigned i=0;i<MS_PLAYERS+1;i++) {
+        if (s_trace[i].owner==s) t=&s_trace[i];
+        if (!s_trace[i].owner && !free_) free_=&s_trace[i];
+    }
+    if (!t) t=free_;
+    if (!t) return;
+    if (t->p!=p) {t->owner=s;t->p=p;t->initialized=0;t->heartbeat=0;}
+    uint32_t *s_last=t->last;
+#else
     static uint32_t s_last[5];
     static int s_n;
+#endif
     uint8_t *w = FIELD(uint8_t *, p, 0x23a0);
     uint32_t now[5] = {(uint32_t)FIELD(uint16_t, p, 0x2506) << 16 | FIELD(uint16_t, p, 0x250a), FIELD(uint8_t, p, 5),
                        CUR_MOTION(p), w ? FIELD(uint16_t, w, 0x4b4) : 0xffffu, FIELD(uint32_t, p, 0x24ac)};
     int same = 1;
     for (int i = 0; i < 5; i++) same &= now[i] == s_last[i];
+#ifdef MS_FREEZE_DIAGNOSTICS
+    /* An unchanged action is not necessarily a freeze (charge and pin holds
+     * are intentional). Record periodic samples without changing the action.
+     * Runs after update so a skipped local input dispatch is still visible. */
+    same &= t->initialized;
+    if (same) {
+        t->heartbeat += FIELD(float,p,0x1c);
+        if (t->heartbeat < 180 || FIELD(uint16_t,p,0x2506)!=0x10) return;
+    }
+    t->heartbeat=0;t->initialized=1;
+#else
     if (same || s_n >= 600) return;
     s_n++;
+#endif
     for (int i = 0; i < 5; i++) s_last[i] = now[i];
     logf("msport: state action %u/%u step %u motion %u frame %d weapon %x table %u", now[0] >> 16, now[0] & 0xffff,
          now[1], now[2], (int)MS_FRAME(p), now[3], now[4]);
+#ifdef MS_FREEZE_DIAGNOSTICS
+    logf("ms-freeze: sample p %x action %u/%u step %u motion %u frame100 %d end100 %d speed100 %d blend100 %d animflags %x dt100 %d local %u held %x stick %d/%d",
+        (uint32_t)(uintptr_t)p,now[0]>>16,now[0]&0xffff,now[1],now[2],(int)(MS_FRAME(p)*100),
+        (int)(FIELD(float,p,0x504)*100),(int)(MS_MOT_SPEED(p)*100),(int)(FIELD(float,p,0x4f4)*100),
+        FIELD(uint8_t,p,0x4b6),(int)(FIELD(float,p,0x1c)*100),!!MS_IS_LOCAL(p),
+        FIELD(uint16_t,p,0x13f4),FIELD(int16_t,p,0x140c),FIELD(int16_t,p,0x1410));
+    if (s) logf("ms-freeze: owner action %u mode %u flags %x fired %x loops %u clock100 %d recovery100 %d step_ticks100 %d air %u attract %u pin %u",
+        s->action,s->mode,s->flags,s->fired,s->loops,(int)(s->action_clock*100),
+        (int)(s->recovery_end*100),(int)(s->step_t*100),s->air,s->att,s->pin_mon!=0);
+#endif
 }
 
 /* ------------------------------------------------------------------------------------------------ monsters */
@@ -675,12 +720,10 @@ static void rep_posts(uint8_t *p, struct ms_state *s, float tk)
     fx_at(p, MS_FXQ_REP_CARRIER, x, rot, 0);
 }
 
-/* the aim view: MHF's aim camera 0x1033a880 (over the shoulder, free look; on in idle / walk / runs, off in the pin
- * actions) and reticle 0x10339700 (sprite 0xb6 at the screen centre) -> GU's gunner aim view (ms.h MS_AIM_BYTE): the
- * quest camera's aim mode 0 (GU's over-the-shoulder offsets) with MHF's look (aim_look), MHF's reticle frames repel
- * blue / attract red / neither white on GU's scope HUD (ms_reticle; deviation: MHF's preset offset). Local hunter
- * only, as MHF (0x1033a270). GU's 0x29fb8c clears the byte at the end of every update (ms.h): ms_after_update (slot
- * 45, right after it) sets it again, so the camera and the scope HUD read 1 */
+/* Insect Glaive-style aim: normal third-person camera and the native pink
+ * centre cursor (scope kind 4, selected by slot 342). The bowgun aim byte stays
+ * clear. Camera input, pitch limits and inversion remain GU's normal camera's;
+ * no Glaive action handler or fields outside the GS-sized object are used. */
 static int aim_want(uint8_t *p, struct ms_state *s)
 {
     return (s->flags & 1) && !(s->flags & 0x10) && MS_IS_LOCAL(p);
@@ -696,97 +739,50 @@ static uint8_t *quest_cam(void)                       /* the quest camera (0x1ba
     return 0;
 }
 
-#define AIM_YAW_STEP 576.0f                             /* MHF 0x1033a880 (C): 0x240 per tick on the camera's yaw */
-#define AIM_PITCH_STEP 352.0f                           /* 0x160 per tick on its pitch */
-#define AIM_PITCH_MAX 3356.0f                           /* MHF clamps -0x12e4..+0xd1c (camera setting 0); the sign of
-                                                           MHF's pitch against GU's is not traced (G): +-0xd1c, the
-                                                           smaller side, holds in both senses */
-
-/* MHF's look (0x1033a880, C): each tick the camera controls (commands 0x20 / 0x21 / 0x22 / 0x23 held, digital: no
- * tilt scaling) step the camera's yaw by 0x240 and its pitch by 0x160 (MHF's invert options 0x1082f610 / 0x1082f660),
- * the pitch clamped; the hunter's body does not turn (the camera's own fields; the shot's start turns him, case 82 /
- * 84 in ms_act). Port: GU's right stick through GU's own aim reader 0x27d5c4 (source 2), with GU's invert options,
- * at MHF's steps per MHF tick (tick_len).
- * Source 1 reads +0x140c/+0x1410 (the movement stick); source 2 reads
- * +0x140e/+0x1412 and the right-stick direction bits at +0x13fc. */
+/* Read the normal camera rather than applying a second right-stick update.
+ * The existing shot-start code already takes this same camera direction. */
 static void aim_look(uint8_t *p, struct ms_state *s)
 {
-    uint32_t d = 0;
-    int16_t mag = 0;
-    if (MS_AIM_DIRS(p, 2, &d, &mag) != 1) d = 0;
-    uint8_t *o = MS_OPT_OBJ;
-    if (o) {
-        uint8_t inv = FIELD(uint8_t, o, 0x66);
-        if ((inv | 2) == 3) d = (d & ~3u) | (d & 1) << 1 | (d & 2) >> 1;
-        if ((inv & 0xfe) == 2) d = (d & ~12u) | (d & 4) << 1 | (d & 8) >> 1;
-    }
-    float tk = tick_len(p);
-    int dy = !!(d & 4) - !!(d & 8), dp = (d & 1) ? 1 : (d & 2) ? -1 : 0;
-    s->aim_yaw += dy * AIM_YAW_STEP * tk;
-    while (s->aim_yaw >= 65536.0f) s->aim_yaw -= 65536.0f;
-    while (s->aim_yaw < 0) s->aim_yaw += 65536.0f;
-    s->aim_pitch += dp * AIM_PITCH_STEP * tk;
-    if (s->aim_pitch > AIM_PITCH_MAX) s->aim_pitch = AIM_PITCH_MAX;
-    if (s->aim_pitch < -AIM_PITCH_MAX) s->aim_pitch = -AIM_PITCH_MAX;
+    (void)p;
+    uint8_t *cam = quest_cam();
+    if (!cam) return;
+    float dx = FIELD(float, cam, 0x60) - FIELD(float, cam, 0x40);
+    float dy = FIELD(float, cam, 0x64) - FIELD(float, cam, 0x44);
+    float dz = FIELD(float, cam, 0x68) - FIELD(float, cam, 0x48);
+    float flat = dx * dx + dz * dz, length2 = flat + dy * dy;
+    if (!(length2 > 1.0f && length2 < 1.0e12f)) return;
+    if (flat > 0.0001f) s->aim_yaw = (float)yaw_to(dx, dz);
+    s->aim_pitch = atan2f_gu(dy, root(flat)) * 10430.378f;
+}
+
+int ms_aim_cursor(uint8_t *p)
+{
+    return aim_want(p, ms_of(p));
 }
 
 static void aim_view(uint8_t *p, struct ms_state *s)
 {
     if (aim_want(p, s)) {
-        uint8_t *cm = MS_CAM_MGR, *cam = quest_cam();
         if (!s->aim_view) {
-            int mode = MS_AIM_MODE(p);
-            float y = FIELD(uint16_t, p, 0xfec);        /* MHF keeps the camera's yaw: the view's yaw, else the hunter's */
-            if (cam) {
-                float dx = FIELD(float, cam, 0x60) - FIELD(float, cam, 0x40), dz = FIELD(float, cam, 0x68) -
-                    FIELD(float, cam, 0x48);
-                if (dx * dx + dz * dz > 1) y = (float)yaw_to(dx, dz);
-            }
-            s->aim_yaw = y;
-            s->aim_pitch = 0;                           /* deviation: MHF starts from the camera's pitch (0x1033a750);
-                                                           GU's pitch sense against the view is not traced: level */
-            MS_AIM_BYTE(p) = 1;
-            MS_AIM_PITCH(p) = 0;
-            if (cm) MS_CAM_AIM(cm, mode);
-            s->aim_log = 10;
+            s->aim_yaw = FIELD(uint16_t, p, 0xfec);
+            s->aim_pitch = 0;
             static int s_n;
-            if (s_n++ < 10) logf("msport: aim view on (camera mode %d, manager %x, quest camera %x, yaw %d deg)", mode,
-                                 (uint32_t)(uintptr_t)cm, (uint32_t)(uintptr_t)cam, (int)(y * (360.0f / 65536.0f)));
-        } else if (s->aim_log) {                        /* before 0x29fb8c: what the last update left (test 22) */
-            s->aim_log--;
-            logf("msport: aim tick: byte %u cam aim %u mode %u settled %u yaw %d deg pitch %d deg (+0x2714 %d)",
-                 MS_AIM_BYTE(p), cam ? FIELD(uint8_t, cam, 0xacc) : 0xff, cam ? FIELD(uint8_t, cam, 0xac8) : 0xff,
-                 cam ? FIELD(uint8_t, cam, 0xa60) : 0xff, (int)(s->aim_yaw * (360.0f / 65536.0f)),
-                 (int)(s->aim_pitch * (360.0f / 65536.0f)), MS_AIM_PITCH(p));
+            if (s_n++ < 10) logf("msport: Glaive aim on (normal camera, native cursor)");
         }
-        {                                               /* MHF's reticle frame (0x10339700, C): 0 repel possible =
-                                                           marker 0 < d < 1400, 1 attract possible = 1400 < d < 4000,
-                                                           else 2 (3-D d to the marker), shown on GU's scope HUD
-                                                           (ms_class.c ms_reticle). MHF also asks 0x10331c10 (C,
-                                                           mechanics.md "MHF's target test"): every refusal there
-                                                           needs a monster state with no traced GU field, so the
-                                                           port, as cond 10 / 11, never refuses (deviation) */
-            float dm = marker_dist(p, s);
-            int fr = dm > 0 && dm < 1400.0f ? 0 : dm > 1400.0f && dm < 4000.0f ? 1 : 2;
-            ms_reticle(fr);
-            static int s_fr = -1, s_frn;
-            if ((fr != s_fr || !s->aim_view) && s_frn++ < 40)
-                logf("msport: aim reticle frame %d (%s), marker %d cm", fr, fr == 0 ? "repel possible, blue" :
-                     fr == 1 ? "attract possible, red" : "neither, white", (int)dm);
-            s_fr = fr;
-        }
-        MS_AIM_BYTE(p) = 1;
+        aim_look(p, s);
+        MS_AIM_BYTE(p) = 0;
+        MS_AIM_PITCH(p) = 0;
+        ms_reticle(-1);
         s->aim_view = 1;
     } else if (s->aim_view) {
-        MS_AIM_BYTE(p) = 0;                             /* the camera's 0x23ebc then ends its aim */
+        MS_AIM_BYTE(p) = 0;
         s->aim_view = 0;
         ms_reticle(-1);                                 /* the scope HUD's HD_hud01 back */
     }
 }
 
-/* slot 45 (+0xb4): GU's 0x281ef8, then the aim view again after 0x29fb8c's clear (ms.h): the byte, the pitch and the
- * camera's aim (0x1baa4 returns at once while +0xacc is on; it restarts the aim after GU's 0x2a0624 ends it on an
- * action change) */
+/* Slot 45: retain native update/remote tasks and refresh only our cursor state.
+ * The normal quest camera owns right-stick input throughout aiming. */
 static void tick(uint8_t *p, struct ms_state *s, float tk);
 void ms_after_update(uint8_t *p)
 {
@@ -797,12 +793,10 @@ void ms_after_update(uint8_t *p)
      * Slot 45 runs for both paths; local tasks already ran in ms_input. */
     if (!MS_IS_LOCAL(p)) tick(p,s,tick_len(p));
     attacks_transition(p,s);
-    if (!s->aim_view || !aim_want(p, s)) return;
-    aim_look(p, s);
-    MS_AIM_BYTE(p) = 1;
-    MS_AIM_PITCH(p) = (int16_t)s->aim_pitch;
-    uint8_t *cm = MS_CAM_MGR;
-    if (cm && quest_cam()) MS_CAM_AIM(cm, MS_AIM_MODE(p));
+#ifdef MS_FREEZE_DIAGNOSTICS
+    trace(p);
+#endif
+    aim_view(p, s);
 }
 
 /* GU's common aim frame (0x2a72e0): rotation from body yaw and negative
@@ -1142,7 +1136,9 @@ static void recovery_clock(uint8_t *p, struct ms_state *s)
 void ms_input(uint8_t *p)
 {
     INPUT_PRE(p);
+#ifndef MS_FREEZE_DIAGNOSTICS
     trace(p);
+#endif
     struct ms_state *s = ms_of(p);
     recovery_clock(p,s);
     static int s_stats;
@@ -1212,7 +1208,9 @@ void ms_input(uint8_t *p)
             MS_SET_CLASS_ID(p, base + k);
             set = 1;
         }
-    if (held & r) {                     /* R + B / Y = R1 + special / evade: not GU's roll (common ids 49 / 50, the
+    /* While sheathed, R is GU's sprint button and must keep its native evades.
+     * Only drawn Magnet Spike commands replace the common roll/sheathe inputs. */
+    if (ms_drawn(p) && (held & r)) {      /* R + B / Y = R1 + special / evade: not GU's roll (common ids 49 / 50, the
                                            plcmd_com 0x0001_013a / 014a ids) nor its sheathe (test 1: R + B at idle
                                            sheathed, common 1/2 comes before our commands in the idle table) */
         static int s_n;
@@ -1248,6 +1246,12 @@ void ms_input(uint8_t *p)
         if (s_n == 0) logf("msport: GU's R role mask %x, dt %d/100", r, (int)(FIELD(float, p, 0x1c) * 100));
         if (s_n++ < 300) logf("msport: buttons held %x (was %x) pressed %x combo %x", held, s->held, trig, combo);
     }
+#ifdef MS_FREEZE_DIAGNOSTICS
+    if (trig || held!=s->held)
+        logf("ms-freeze: input action %u/%u step %u frame100 %d held %x pressed %x combo %x stick %d/%d gauge %d",
+            jst,jno,FIELD(uint8_t,p,5),(int)(MS_FRAME(p)*100),held,trig,combo,
+            FIELD(int16_t,p,0x140c),FIELD(int16_t,p,0x1410),s->gauge);
+#endif
     s->held = held;
 }
 
@@ -1791,6 +1795,7 @@ static void action_start(uint8_t *p, struct ms_state *s, const struct ms_action 
     attacks_end(p,s);           /* a new action, including a restart of the same move */
     ms_cancel_windows_reset(p);
     uint32_t no = a->no;
+    int guard_draw = no == 112 && !ms_drawn(p);
     float t[3], *q = pos_of(p);
     keep_end(p, s, "action change", no);               /* MHF: 0x10a80a00 -> 0x10a80050 clears ext+0x284 (C) */
     s->action = (uint16_t)no; s->fired = s->code_fired = 0;
@@ -1808,7 +1813,7 @@ static void action_start(uint8_t *p, struct ms_state *s, const struct ms_action 
     if (IN(s_cost, no)) gauge_add(s, -BAR);
     MS_ACTION_FLAGS(p, s->air || s->pin_mon ? 2 : 0, 1, 0);
     ((void (*)(void *, uint32_t))MS_VT(p, 0x46c))(p, 1);
-    if (no == 78 || no == 79 || ((no == 59 || no == 73) && !ms_drawn(p)))
+    if (no == 78 || no == 79 || guard_draw || ((no == 59 || no == 73) && !ms_drawn(p)))
         MS_DRAW_FLAG(p, 1);                             /* the draw attacks, as GS's (59: the sheathed jump's) */
     switch (no) {
     case 34: s->charge = 0; s->charge_lvl = 0; break;

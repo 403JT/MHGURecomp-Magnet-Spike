@@ -131,10 +131,30 @@ def body_chans(parts, mid):
     return lo, chans
 
 
+def key_frame(chans):
+    """the last key frame of any channel; chans = iterable of {channel: (key type, keys)} (see msgrip.value)"""
+    last = 0
+    for ch in chans:
+        for t, keys in ch.values():
+            if keys:
+                last = max(last, max(k[1] if t in (17, 18, 33, 34) else k[2] for k in keys))
+    return last
+
+
+def motion_frames(header, chans):
+    """the last frame of an AAN motion: its header's count, or its last key when the header says less. The header
+    says 0 for MHF 1057 / 1055 / 1067 (body and weapon) and for the body of 1426 although their keys run to frame
+    44 / 46 / 48 / 26; trusting it made them one-frame motions (action 153, Double Slash's X+A follow-up, waits for
+    frame 26 of 1426 and froze the hunter for good; actions 21 / 24 / 49 skipped their first, lead-in motion
+    1057 / 1055 / 1067, which ends close to the pose the next motion starts from). Every other motion's header equals
+    its last key, so only those four change."""
+    return max(int(header), int(key_frame(chans)))
+
+
 def body(parts, mid, events=None):
     """MHF body motion -> GU animation dict (frames, loop, tracks, end)"""
     mo, chans = body_chans(parts, mid)
-    n = int(mo['frames']) + 1
+    n = motion_frames(mo['frames'], chans.values()) + 1
     loop = int(mo['loop_start']) if mo['loop'] else -1
     tracks = []
     root = [np.array([channel(chans[1], 't' + a, f, 0.0) for a in 'xyz']) for f in range(n)]
@@ -164,7 +184,7 @@ def weapon(wparts, wbones, mid, holders=None, world=None, frames=None):
     world = body_world(...) for the bone-18 frames"""
     part, slot = (mid - 1000) // 100, (mid - 1000) % 100
     mo = wparts[part].get(slot)
-    n = frames or (int(mo['frames']) + 1 if mo else 1)
+    n = frames or (motion_frames(mo['frames'], mo['bones']) + 1 if mo else 1)
     chans = {b['node']: (mo['bones'][i] if mo and i < len(mo['bones']) else {}) for i, b in enumerate(wbones)}
     tracks = []
     for b in wbones:

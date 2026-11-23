@@ -1,29 +1,29 @@
-# Compatibility
+# Compatibility — v0.1.0-alpha.5
 
-- **Game:** Monster Hunter Generations Ultimate 1.4.0, title
+- **Game:** Monster Hunter Generations Ultimate 1.4.0, English, title
   `0100770008DD8000`, executable build ID `FB08F1D20FD1204FE7070672777F869B`.
-- **Language:** English.
-- **Initial platform:** Windows x64.
-- **Play mode:** Single-player. Multiplayer is not validated.
-- **Tested public runtime:** official **MHGURecomp 0.18.0 for Windows x64**.
-  Its built-in mod loader passed an equipped-weapon combo/recovery test and a
-  clean-save town load with no preinjected Magnet Spike equipment. Both tests
-  were muted and used disposable save copies. See `release-validation.json`.
-  The sharpness correction additionally passed existing-crafted-weapon reload,
-  correct blue/white capacity, and normal Whetstone use after a real collision
-  on that official runtime. All test games were muted; original saves were unchanged.
+- **Runtime tested:** official Windows x64 MHGURecomp **0.18.0**, using its
+  built-in `mods/<folder>/exefs` and `romfs` loader. No modified executable or
+  external launcher is required to play the release.
+- **Fresh merged native tests:** single-player, Guild style, disposable copied
+  saves, muted. Both forms' aim/pin/attraction, the formerly stalled follow-up
+  via ordinary inputs, and the four restored motion timelines passed.
+- **Compiled checks:** names and smithy, aim, sprint-roll, guard-draw,
+  interrupted damage and recovery passed against the merged source.
 
-**Alpha.2 feedback validation:** the exact final payload passed four native
-Shock cancellation cases, five ordinary R + X/stick cases, and a remote-input
-recovery test on official 0.18.0. Separate instrumented tests verified marker
-translation/rotation and replacement effects on a held Volvidon. Those are
-controlled diagnostics, not connected multiplayer hunts or Diablos validation.
-The report in `release-validation.json` records the distinction.
+Earlier releases supply historical evidence for sharpness/Whetstone use,
+smithy/progression, six-style aiming, ordinary sprint-roll/guard-draw and remote
+state/marker diagnostics. Those are not fresh full-play tests of this combined
+build. Connected multiplayer, a new full hunt, all styles on the combination,
+human assessment of the restored lead-ins and mouse aim remain unvalidated.
+The reproduced Double Slash follow-up stall is fixed; other freezes and the
+unconfirmed parry report are not ruled out.
 
-The mod uses the normal `mods/<folder>/exefs` and `romfs` loader. It does not
-require a modified MHGURecomp executable or a mandatory external launcher.
-Future/older MHGURecomp releases and other operating systems are not guaranteed.
+This is an experimental **Recomp** package. Switch emulators, Switch hardware,
+other game versions/languages, operating systems and older/future Recomp
+versions are outside the tested target. Enable only one Magnet Spike package.
+Multiple mods supplying subsdk1 or overlapping patches/new weapon allocations
+need explicit integration; no other mod combination is certified.
 
-Only one code mod is covered by this alpha's tests. In particular, multiple
-mods supplying `subsdk1` do not combine automatically. Executable-patch and
-weapon-class allocation conflicts require explicit integration.
+See [INSTALL.md](INSTALL.md), [RELEASE_NOTES.md](RELEASE_NOTES.md) and the exact
+payload/test record in release-validation.json.

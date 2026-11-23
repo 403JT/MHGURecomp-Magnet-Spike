@@ -210,7 +210,22 @@ def slot_plan(acts):
     return plan, own
 
 
+MOTION_FRAMES = {}                    # MHF motion -> the frame count of its converted slot (filled by build_motions)
+
+
+def check_frame_waits(acts):
+    """A step of kind 4 plays its motion until frame N, and GU's motion frame stops at the motion's last frame, so a
+    motion with fewer than N + 1 frames makes the step last forever (action 153's did: the hunter froze). Stops the
+    build instead of shipping one."""
+    for a in ACTIONS:
+        for k, (kind, mot, start, blend, frame, loops) in enumerate(acts[a]['steps']):
+            if kind == 4 and mot in MOTION_FRAMES:
+                assert MOTION_FRAMES[mot] > frame, 'action %d step %d waits for frame %d of MHF %d, which has %d frames' % (
+                    a, k, frame, mot, MOTION_FRAMES[mot])
+
+
 def build_motions(plan, gs_list):
+    MOTION_FRAMES.clear()
     w13 = aan.parse(open(os.path.join(MHF, 'motion', 'w13.aan'), 'rb').read())
     w13w = aan.parse(open(os.path.join(MHF, 'motion', 'w13w.aan'), 'rb').read())
     _, bbones = fskl.parse(open(os.path.join(MHF, 'player', 'm_editpl.fskl'), 'rb').read())
@@ -227,11 +242,12 @@ def build_motions(plan, gs_list):
         a = msmot.body(w13, mid, None)
         if ev: a['events'] = msmot.rescale_events(ev, a['frames'])
         body[slot] = a
+        MOTION_FRAMES[mid] = a['frames']
         part, s = (mid - 1000) // 100, (mid - 1000) % 100
         mo = w13w[part].get(s)
         hs = None
         if mo:
-            hs = msgrip.holders(weapon, msgrip.tracks_of(mo, weapon.bones), mo['frames'], fist)
+            hs = msgrip.holders(weapon, msgrip.tracks_of(mo, weapon.bones), msmot.motion_frames(mo['frames'], mo['bones']), fist)
             holders[mid] = hs
         wpn[slot] = msmot.weapon(w13w, wbones, mid, hs, msmot.body_world(w13, bbones, mid), a['frames'])
         sw = [f for f in range(1, len(hs)) if hs[f] != hs[f - 1]] if hs else []
@@ -748,6 +764,7 @@ def main(report_only=False, build_reticle=True):
     plan, own = slot_plan(acts)
     body, wlist, mreport, holders, wdata = build_motions(plan, w00['player\\mot\\w00\\w00'][1])
     msmot.check(body); msmot.check(wlist)
+    check_frame_waits(acts)
     hdp, hts, hit_index, hreport, swings = build_hits(acts, sdt_d, w00['player\\hit\\pl_we00_hitdata'][1],
                                                       w02['player\\hit\\pl_we02_hitdata'][1], own, holders, wdata)
     cmds, tbl, tbl_index, creport = build_commands(acts, gs_m0)

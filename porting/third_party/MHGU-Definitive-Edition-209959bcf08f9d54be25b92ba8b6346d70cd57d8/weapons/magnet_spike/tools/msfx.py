@@ -52,7 +52,8 @@ WHOOSH_B, WHOOSH_FAST, WHOOSH_SLOW = 65, 90, 94
 
 
 def frames_of(w13, mot):
-    return int(msmot.body_chans(w13, mot)[0]['frames']) + 1
+    lo, chans = msmot.body_chans(w13, mot)
+    return msmot.motion_frames(lo['frames'], chans.values()) + 1
 
 
 def euler_xyz(R):

@@ -105,7 +105,9 @@ static void pick416(uint8_t *p) { tbl(p, state178(p) ? 2046 : 2045, 0); }
 /* slot 187 (+0x2ec): the sheathed state's indirect weapon commands (common list, act_st 0x8010, act_no 0..8;
  * the command step 0x2e9d54 reads {act_st, act_no, act_param} here). MHF (0x1032d110 / 0x1032d210): tri = the shared
  * draw standing, Vertical 1 (78) moving; tri+circle = Impact Horizontal 1 (79). Indexes as GS's table: 0 / 1 = X
- * (common ids 0xb / 0xc), 3 = X + A (0x17); 2 / 4 = act_st 0x20 (S: GU's own, kept). GS picks its row by style
+ * (common ids 0xb / 0xc), 3 = X + A (0x17); 2 / 4 are GU's guard draws. Frontier's sheathed
+ * chord handler 1032d110 / 1032d210 selects Impact Guard (112) for R1+tri+circle,
+ * not the inherited GS common guard. GS picks its row by style
  * (vt+0x168, test 1: 5 = Valor); MHF by moving: GU runs a locomotion action (act_st 2: walk 2/1, run 2/9). */
 static const uint16_t s_ind_stand[9][3] = {{1, 1, 0}, {1, 1, 0}, {0x20, 0, 0}, {0x10, 79, 0}, {0x20, 0, 0},
                                            {1, 0, 0}, {1, 0, 0}, {1, 0, 0}, {1, 0, 0}};
@@ -119,6 +121,8 @@ static const uint16_t *indirect(uint8_t *p, uint32_t k)
         logf("msport: sheathed command %u in action %u/%u (%s)", k, FIELD(uint16_t, p, 0x2506),
              FIELD(uint16_t, p, 0x250a), moving ? "moving" : "standing");
     if (k > 8) k = 8;
+    static const uint16_t s_guard_draw[3] = {0x10,112,0};
+    if ((k==2 || k==4) && FIELD(uint16_t,p,0x2506)!=4) return s_guard_draw;
     /* test 9: every Y in a sheathed jump (4/14, table 2024) came as command 5 = GS's jumping draw attack; ours had
      * {1, 0, 0} (nothing). MHF's falling attack 59 (Cutting; the attraction flight's tri) draws in the air */
     static const uint16_t s_air[3] = {0x10, 59, 0};
@@ -161,8 +165,9 @@ void ms_init(void)
     vt_fn(37, ms_on_hit);           /* +0x94: after our attack's damage on a monster (every class: bx lr) */
     vt_fn(356, ms_guarded);         /* +0x590: the guard reaction (build.py's guard patches let class 5 guard) */
     vt_fn(44, ms_invuln);           /* +0xb0: invulnerable now (GU's), + MHF's "evaded through an attack" */
-    vt_fn(45, ms_after_update);     /* +0xb4: after GU's 0x29fb8c (aim byte clear) in the player update: the aim view */
-    vt_fn(260, ms_aim_cam);         /* +0x410: the quest camera's aim mode 0 hook: MHF's look into its yaw / pitch */
+    vt_fn(45, ms_after_update);     /* +0xb4: native update, ownership cleanup and local cursor refresh */
+    vt_fn(260, ms_aim_cam);         /* +0x410: retain the initialized matrix fallback for common camera callers */
+    vt_fn(342, ms_aim_cursor);      /* +0x558: scope kind 4, the native Insect Glaive centre cursor */
     forge_tables_init();
     /* still GS's: 82 (resource setup + manager group 35, S), 443 (common actions 0x172-0x174 at GS frames) */
     logf("msport: class 5 vtable at %x (GS %x)", (uint32_t)(uintptr_t)ms_vt, MAIN(VT_GS));

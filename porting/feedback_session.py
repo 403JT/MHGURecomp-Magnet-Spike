@@ -19,7 +19,7 @@ def files(root):
 
 
 class Session:
-    def __init__(self, label, baseline=False, quest=101, live=False, instrumented=False, payload_root=None, dummy_distance=None):
+    def __init__(self, label, baseline=False, quest=101, live=False, instrumented=False, payload_root=None, dummy_distance=None, reaction_fixture=False, save_setup=None):
         if not re.fullmatch('[a-z0-9_-]+', label):
             raise ValueError('Invalid evidence label')
         self.folder = HERE / 'runs' / label
@@ -31,6 +31,9 @@ class Session:
         save.mkdir(parents=True)
         for name in self.source_hashes:
             shutil.copyfile(self.source / name, save / name)
+        # Optional test-only setup receives the newly created disposable save
+        # directory. Original saves remain read-only and are hashed on exit.
+        fixture = save_setup(save) if save_setup else None
         payload = payload_root if payload_root is not None else (
             HERE / 'backups/before-feedback-1/public-payload' if baseline
             else HERE / 'output/magnet-spike-experimental')
@@ -56,15 +59,22 @@ class Session:
             MHGU_QUICKHUNT=str(quest))
         if live:
             env.update(MHGU_SUMMON='240', MHGU_SUMMON_FREE='1')
+        if reaction_fixture:
+            if not live or not instrumented:
+                raise ValueError('Reaction fixture requires the isolated live-monster instrumented runtime')
+            env.update(MHGU_SUMMON_FREE='0', MHGU_EMTRACE='1')
         if dummy_distance is not None:
-            if not instrumented or live:raise ValueError('Dummy fixture requires the isolated instrumented runtime')
+            if live:raise ValueError('Dummy fixture cannot also request a free live monster')
             env.update(MHGU_DUMMY=str(dummy_distance),MHGU_DUMMY_FACE='1')
         self.report = {'runtime': 'instrumented Recomp' if instrumented else 'official Windows MHGURecomp 0.18.0',
             'runtime_sha256': expected_exe, 'baseline': baseline,
             'live_monster': live,
+            'reaction_fixture_hunter_held_with_test_hp': reaction_fixture,
             'dummy_distance_cm':dummy_distance,
             'payload_files': self.payload, 'muted': True, 'source_saves_unchanged': None,
             'exit_code': None, 'failure': None, 'cases': []}
+        if fixture is not None:
+            self.report['save_fixture'] = fixture
         self.samples = 0
         with (self.folder / 'console.log').open('wb') as out:
             self.process = subprocess.Popen([str(exe)], cwd=self.folder, env=env,
