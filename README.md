@@ -21,6 +21,9 @@ The game must be **MHGU 1.4.0**, with the English game language. Runtime and
 platform compatibility are recorded separately in [COMPATIBILITY.md](COMPATIBILITY.md).
 MHGU 1.4.0 is the game's version, not an MHGURecomp release number.
 
+## Trailer 
+  https://youtu.be/p3nbBdvC3DU?si=ApiMDIyX8Fa5GNaP
+
 ## Included
 
 - Cutting and Impact forms, magnetic marking/movement, charging, guard/counter,
