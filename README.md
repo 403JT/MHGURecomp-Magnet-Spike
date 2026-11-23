@@ -73,6 +73,8 @@ weapon/form and inputs, expected result, and what happened. Attach a screenshot
 or short clip if useful. Logs can contain local paths; review them before sharing.
 Do not upload saves, game files, keys or credentials.
 
+## Discord Link for Bugs and suggestions
+https://discord.gg/XRjyKzkPsX
 ## Source and credits
 
 The weapon code/converters derive from Scrimas's
