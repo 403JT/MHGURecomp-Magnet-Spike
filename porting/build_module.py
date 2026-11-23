@@ -2,6 +2,7 @@
 
 The output stays in porting/output. This script never installs or launches it.
 """
+import argparse
 import importlib.util
 import json
 import os
@@ -50,14 +51,32 @@ def run(exe, *args):
     return result.stdout
 
 
-def main():
+def target_settings(target):
+    """Keep emulator output separate from the published Recomp payload."""
+    defines = ['MS_SLICE', 'MS_GS_TREE']
+    if target == 'recomp':
+        defines.append('MS_RECOMP')
+        out = OUT
+    elif target == 'ryujinx':
+        out = OUT / 'ryujinx'
+    else:
+        raise ValueError(f'Unsupported target: {target}')
+    defines.append('MS_BALANCE')
+    return out, defines
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--target', choices=('recomp', 'ryujinx'), default='recomp')
+    args = parser.parse_args(argv)
+    out, defines = target_settings(args.target)
     audit()
     if not (MS / 'gen/ms_data.inc').is_file():
         raise RuntimeError('Run build_assets.py --native-reticle first')
     sound_status = json.loads((HERE / 'sound-build.json').read_text(encoding='utf-8'))
     if sound_status.get('player_arc_sha256') != sha(MS / 'romfs/nativeNX/arc/player/quest/w05.arc'):
         raise RuntimeError('Run build_sounds.py after the asset build; sound resources are missing or stale')
-    OUT.mkdir(parents=True, exist_ok=True)
+    out.mkdir(parents=True, exist_ok=True)
     from build_hitstats import generate
     generate()
     from build_cancel_windows import generate as generate_windows
@@ -66,7 +85,7 @@ def main():
     tree = generate_tree()
     from build_balance import generate as generate_balance
     balance = generate_balance()
-    os.environ['GOG_DEFINES'] = 'MS_SLICE MS_GS_TREE MS_RECOMP MS_BALANCE'
+    os.environ['GOG_DEFINES'] = ' '.join(defines)
     os.environ['GU_CODE'] = str(HERE / 'work/gu_main')
     os.environ['GU_EXEFS'] = str(ROOT / 'MHGURecomp.0.14.0/Windows-MHGURecomp/data/exefs')
     sys.path.insert(0, str(CONVERTER / 'tools'))
@@ -84,23 +103,27 @@ def main():
     hooks.append(('ms_local_cancel_range',0x281388))
     hooks.append(('ms_tree_model_file',0x286ac0))
     hooks.append(('ms_tree_forge_count',0x162e0c))
+    if args.target == 'recomp':
+        hooks.append(('ms_local_quick_message',0x65f920))
+        hooks.append(('ms_local_attack_live',0x169328))
     trampolines = []
     for name, site in hooks:
         if build.branch_into(img, site) is not None:
             raise RuntimeError(f'Branch targets the displaced word of {name}')
-        trampolines.append(hook_codegen.trampoline(build, img, name, site))
-    (OUT / 'hooks.inc').write_text('\n'.join(trampolines), encoding='utf-8')
-    (OUT / 'layout.inc').write_text(f'    .equ MAIN_GAP, 0x{build.MAIN_GAP:x}\n', encoding='utf-8')
-    includes = ['-I', str(OUT), '-I', str(UPMOD), '-I', str(MS / 'module'), '-I', str(MS / 'gen')]
-    flags = build.CFLAGS + ['-DMS_SLICE', '-DMS_GS_TREE', '-DMS_RECOMP', '-DMS_BALANCE'] + includes
-    sources = [UPMOD / 'crt0.S', UPMOD / 'util.c', MOD / 'local.c', MOD / 'sound.c', MOD / 'pin.c', MOD / 'hitstats.c', MOD / 'worldhits.c', MOD / 'cancel_windows.c', MOD / 'smithy.c', MS / 'module/ms_class.c', MS / 'module/ms_act.c']
+        trampolines.append(hook_codegen.trampoline(build, img, name, site, args.target))
+    (out / 'hooks.inc').write_text('\n'.join(trampolines), encoding='utf-8')
+    (out / 'layout.inc').write_text(f'    .equ MAIN_GAP, 0x{build.MAIN_GAP:x}\n', encoding='utf-8')
+    includes = ['-I', str(out), '-I', str(OUT), '-I', str(UPMOD),
+                '-I', str(MS / 'module'), '-I', str(MS / 'gen')]
+    flags = build.CFLAGS + ['-D' + name for name in defines] + includes
+    sources = [UPMOD / 'crt0.S', UPMOD / 'util.c', MOD / 'local.c', MOD / 'sound.c', MOD / 'pin.c', MOD / 'hitstats.c', MOD / 'worldhits.c', MOD / 'cancel_windows.c', MOD / 'smithy.c', MOD / 'feedback.c', MS / 'module/ms_class.c', MS / 'module/ms_act.c']
     objects = []
     for source in sources:
-        obj = OUT / (source.name + '.o')
+        obj = out / (source.name + '.o')
         run('clang', *flags, '-c', source, '-o', obj)
         objects.append(obj)
-    elf = OUT / 'magnet-spike.elf'
-    win_source, win_obj = OUT / 'hookwin.S', OUT / 'hookwin.o'
+    elf = out / 'magnet-spike.elf'
+    win_source, win_obj = out / 'hookwin.S', out / 'hookwin.o'
 
     def link(entries, windows):
         win_source.write_text(build.hookwin_asm(entries, windows), encoding='utf-8')
@@ -127,7 +150,7 @@ def main():
     for name in ['__hookwin', *[n + '_tramp' for n, _ in hooks]]:
         if syms[name] != final[name]:
             raise RuntimeError('Hook layout moved during final link')
-    moddir = OUT / 'magnet-spike-experimental'
+    moddir = out / 'magnet-spike-experimental'
     (moddir / 'exefs').mkdir(parents=True, exist_ok=True)
     (moddir / 'exefs/subsdk1').write_bytes(build.nso.elf2nso(elf.read_bytes()))
     records, touched = [], set()
@@ -168,15 +191,18 @@ def main():
     record(sharpness_site, struct.pack('<I', build.movw_imm(old, 0xd780)))
     (moddir / 'exefs' / (build.MAIN_BUILD_ID + '.ips')).write_bytes(b'IPS32' + b''.join(records) + b'EEOF')
     shutil.copytree(MS / 'romfs', moddir / 'romfs', dirs_exist_ok=True)
-    (OUT / 'symbols.json').write_text(json.dumps(final, indent=2) + '\n', encoding='utf-8')
-    (OUT / 'module-status.json').write_text(json.dumps({
+    (out / 'symbols.json').write_text(json.dumps(final, indent=2) + '\n', encoding='utf-8')
+    (out / 'module-status.json').write_text(json.dumps({
         'status': 'experimental build; gameplay verification is recorded separately', 'hooks': len(hooks),
+        'target': args.target, 'defines': defines,
+        'module_sha256': sha(moddir / 'exefs/subsdk1'),
+        'ips_sha256': sha(moddir / 'exefs' / (build.MAIN_BUILD_ID + '.ips')),
         'patch_records': len(records), 'weapon_count': tree['counts']['base']-1,
         'smithy_tree': True, 'balance_revision': balance['policy']['revision'],
         'sharpness_revision': 'sharpness-1',
         'balance_policy_sha256':balance['policy_sha256'],
         'full_port_complete': False}, indent=2) + '\n', encoding='utf-8')
-    print(f'Built experimental smithy-tree module: {len(hooks)} hooks, {len(records)} verified patch sites.')
+    print(f'Built experimental {args.target} smithy-tree module: {len(hooks)} hooks, {len(records)} verified patch sites.')
 
 
 if __name__ == '__main__':

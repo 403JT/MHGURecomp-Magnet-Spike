@@ -14,12 +14,15 @@
 #define VT_SLOTS 556
 static uint32_t s_vt[2 + VT_SLOTS];  /* 2 words before the address point copied too */
 static uint32_t *ms_vt;
-static struct ms_state s_state[MS_PLAYERS];
+/* Four registered hunters plus the object a factory is constructing before
+ * sPlayer replaces its roster entry. Never reclaim a registered hunter. */
+#define MS_STATE_SLOTS (MS_PLAYERS + 1)
+static struct ms_state s_state[MS_STATE_SLOTS];
 
 struct ms_state *ms_find(uint8_t *p)
 {
     if (!p) return 0;
-    for (int i = 0; i < MS_PLAYERS; i++) if (s_state[i].p == p) return &s_state[i];
+    for (int i = 0; i < MS_STATE_SLOTS; i++) if (s_state[i].p == p) return &s_state[i];
     return 0;
 }
 static void forge_tables_init(void);
@@ -27,11 +30,26 @@ static void forge_tables_init(void);
 struct ms_state *ms_of(uint8_t *p)
 {
     struct ms_state *free_ = 0;
-    for (int i = 0; i < MS_PLAYERS; i++) {
+    for (int i = 0; i < MS_STATE_SLOTS; i++) {
         if (s_state[i].p == p) return &s_state[i];
         if (!s_state[i].p && !free_) free_ = &s_state[i];
     }
-    if (!free_) free_ = &s_state[0];
+    if (!free_) {
+        uint8_t *mgr=*(uint8_t **)MAIN(0x1885b58), *live[MS_PLAYERS];
+        for (unsigned j=0;j<MS_PLAYERS;j++) live[j]=mgr?FIELD(uint8_t *,mgr,0x1c+4*j):0;
+        for (unsigned i=0;i<MS_STATE_SLOTS;i++) {
+            unsigned registered=0;
+            for (unsigned j=0;j<MS_PLAYERS;j++) registered|=s_state[i].p==live[j];
+            if (!registered) {free_=&s_state[i];break;}
+        }
+        /* The snapshot has at most four distinct pointers and the pool has
+         * five distinct owners, so at least one entry is unregistered. No
+         * departed object is dereferenced while identifying that entry. */
+    }
+    if (free_->p) {
+        ms_world_hits_reset(free_->p);
+        ms_cancel_windows_reset(free_->p);
+    }
     free_->p = p;
     ms_reset(free_);
     return free_;

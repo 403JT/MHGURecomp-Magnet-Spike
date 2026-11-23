@@ -13,6 +13,13 @@
   correct blue/white capacity, and normal Whetstone use after a real collision
   on that official runtime. All test games were muted; original saves were unchanged.
 
+**Alpha.2 feedback validation:** the exact final payload passed four native
+Shock cancellation cases, five ordinary R + X/stick cases, and a remote-input
+recovery test on official 0.18.0. Separate instrumented tests verified marker
+translation/rotation and replacement effects on a held Volvidon. Those are
+controlled diagnostics, not connected multiplayer hunts or Diablos validation.
+The report in `release-validation.json` records the distinction.
+
 The mod uses the normal `mods/<folder>/exefs` and `romfs` loader. It does not
 require a modified MHGURecomp executable or a mandatory external launcher.
 Future/older MHGURecomp releases and other operating systems are not guaranteed.

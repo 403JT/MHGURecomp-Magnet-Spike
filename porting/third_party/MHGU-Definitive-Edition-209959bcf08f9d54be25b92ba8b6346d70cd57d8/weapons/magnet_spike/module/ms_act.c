@@ -432,6 +432,42 @@ static void shock_tick(uint8_t *p, struct ms_state *s, float tk)
     if (s->shock_k >= MS_NSHOCK) s->shock_on = 0;
 }
 
+int ms_attack_matches(uint8_t *p,const struct ms_state *s,unsigned slot)
+{
+    if (slot>=2 || !s->armed[slot]) return 0;
+    uint8_t *a=p+0x3020+slot*0xb8;
+    return FIELD(uint8_t *,a,0xc)==p && FIELD(uint8_t *,a,0x70)==p &&
+        FIELD(const uint8_t *,a,0x84)==s->armed_resource[slot] &&
+        FIELD(uint32_t,a,0x88)==s->armed_shape[slot];
+}
+
+static void attacks_end(uint8_t *p,struct ms_state *s)
+{
+    unsigned stopped=s->shock_on || s->armed[0] || s->armed[1];
+    s->shock_on=0;s->shock_k=0;s->shock_t=0;s->pin_pending=0;
+    for (unsigned slot=0;slot<2;slot++) {
+        if (ms_attack_matches(p,s,slot)) {
+            uint8_t *a=p+0x3020+slot*0xb8;
+            /* Native collision's 169328 predicate requires byte +5 and an
+             * expired start delay. The native lifetime path clears +5 when
+             * the live timer expires. End only slots still owned by this move. */
+            FIELD(uint8_t,a,5)=0;
+            FIELD(float,a,0x5c)=FIELD(float,a,0x60)=0;
+        }
+        s->armed[slot]=0;s->armed_resource[slot]=0;s->armed_shape[slot]=0;
+    }
+    ms_world_hits_reset(p);
+    static unsigned n;
+    if (stopped && n++<80) logf("ms-feedback: ended attacks from action %u on transition to %u/%u",
+        s->action,FIELD(uint16_t,p,0x2506),FIELD(uint16_t,p,0x250a));
+}
+
+static void attacks_transition(uint8_t *p,struct ms_state *s)
+{
+    if (FIELD(uint16_t,p,0x2506)!=0x10 || FIELD(uint16_t,p,0x250a)!=s->action)
+        attacks_end(p,s);
+}
+
 /* the marker's and Magnetise's GS stand-in looks, used only with the MHF effects off (MS_FXQ_ON 0; with them: fc5:e
  * on the marker, magz_look): GS charge flashes (msfx MARKER_EFX / AURA_EFX, no sound tied) every MARKER_BLINK /
  * AURA_EVERY ticks, the marker's at its point through a
@@ -751,10 +787,16 @@ static void aim_view(uint8_t *p, struct ms_state *s)
 /* slot 45 (+0xb4): GU's 0x281ef8, then the aim view again after 0x29fb8c's clear (ms.h): the byte, the pitch and the
  * camera's aim (0x1baa4 returns at once while +0xacc is on; it restarts the aim after GU's 0x2a0624 ends it on an
  * action change) */
+static void tick(uint8_t *p, struct ms_state *s, float tk);
 void ms_after_update(uint8_t *p)
 {
     MS_AFTER_UPDATE_GU(p);
     struct ms_state *s = ms_of(p);
+    /* GU 27c97c does not dispatch input to remote hunters. Their projectile,
+     * marker and other pending tasks must still advance while idle or hit.
+     * Slot 45 runs for both paths; local tasks already ran in ms_input. */
+    if (!MS_IS_LOCAL(p)) tick(p,s,tick_len(p));
+    attacks_transition(p,s);
     if (!s->aim_view || !aim_want(p, s)) return;
     aim_look(p, s);
     MS_AIM_BYTE(p) = 1;
@@ -1022,6 +1064,7 @@ static void keep_end(uint8_t *p, struct ms_state *s, const char *why, uint32_t n
 
 static void tick(uint8_t *p, struct ms_state *s, float tk)
 {
+    attacks_transition(p,s);   /* cancel before a queued Shock can arm another hit */
     ms_sound_tick(p, s, tk);
     fx_posts(p, s);
     fxw_tick();
@@ -1272,6 +1315,9 @@ static void arm(uint8_t *p, struct ms_state *s, uint32_t hit)
     MS_ARM(p, s->slot, hit, 3);                         /* GU's weapon classes pass 3 or 0; 0x2b76cc sets the
                                                            element (bit 1) only for a non-zero value (test 4: 0, the
                                                            fire / dragon spikes hit raw) */
+    uint8_t *native=p+0x3020+s->slot*0xb8;
+    s->armed_resource[s->slot]=FIELD(const uint8_t *,native,0x84);
+    s->armed_shape[s->slot]=FIELD(uint32_t,native,0x88);
     ms_apply_hit_stats(p,s->slot,hit);
     unsigned base_hit=hit>MS_MAG_BASE?hit-MS_MAG_BASE:hit;
     ms_world_hit_armed(p,s->slot,hit,base_hit>=MS_HIT_SHOCK && base_hit<MS_HIT_SHOCK+MS_NSHOCK);
@@ -1742,6 +1788,7 @@ static void start_step(uint8_t *p, struct ms_state *s, const struct ms_action *a
 
 static void action_start(uint8_t *p, struct ms_state *s, const struct ms_action *a)
 {
+    attacks_end(p,s);           /* a new action, including a restart of the same move */
     ms_cancel_windows_reset(p);
     uint32_t no = a->no;
     float t[3], *q = pos_of(p);
@@ -1882,6 +1929,10 @@ void ms_act(uint8_t *p)
 {
     uint32_t no = FIELD(uint16_t, p, 0x250a);
     struct ms_state *s = ms_of(p);
+    /* GU's input dispatcher (27c97c) skips nonlocal hunters. Their weapon
+     * actions still run, so advance their recovery clock here. The local
+     * hunter keeps its existing input-side update and must not tick twice. */
+    if (!(FIELD(uint8_t,p,0x13cc)&1)) recovery_clock(p,s);
     if (no == MS_RELEASE) {                     /* MHF shared 208: the charge released */
         logf("msport: Triple Strike released at f%d, A %s, charge %d/%d ticks (level %u)", (int)MS_FRAME(p),
              (FIELD(uint16_t, p, 0x13f4) & PAD_R) ? "held" : "up", (int)s->charge, CHARGE_T, s->charge_lvl);

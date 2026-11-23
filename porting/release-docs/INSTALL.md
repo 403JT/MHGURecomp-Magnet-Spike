@@ -1,4 +1,4 @@
-# Install v0.1.0-alpha.1
+# Install v0.1.0-alpha.2
 
 ## Before installing
 
@@ -14,7 +14,7 @@
 
 ## Install
 
-1. Download `Magnet-Spike-v0.1.0-alpha.1.zip` from GitHub Releases.
+1. Download `Magnet-Spike-v0.1.0-alpha.2.zip` from GitHub Releases.
 2. Extract it and copy its **Magnet-Spike** folder into MHGURecomp's **mods** folder:
 
    ```text
@@ -45,7 +45,12 @@ Close the game and make a new save backup. Move the old **Magnet-Spike** folder
 out of `mods`, then put the new version in its place. Keep only one copy enabled.
 Read the new version's notes before loading a save from an older mod version.
 
-This release includes the fix for crafted weapons being capped at red/low
+Alpha.2 includes the cumulative feedback fixes described in
+[FEEDBACK_FIXES.md](FEEDBACK_FIXES.md). Existing Magnet Spike weapon IDs,
+recipes, stats and models are preserved; no save editing or recrafting is
+needed when updating from alpha.1.
+
+This release also includes the earlier fix for crafted weapons being capped at red/low
 sharpness. Restart with the updated mod; existing weapons use their correct
 sharpness automatically. Recrafting or editing your save is unnecessary.
 

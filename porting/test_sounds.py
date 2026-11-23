@@ -10,10 +10,14 @@ EXPORTS=['ms_sound_post','ms_sound_post_at','ms_local_hit_sound_c','ms_local_sou
          'test_sound_tick','test_sound_reset','test_sound_bind']
 EXPORTS+=['test_code_state','test_sound_guard','test_sound_segment']
 
-def compile_test():
-    obj, elf = OUT/'regression/sound.o', OUT/'regression/sound.elf'
+def compile_test(target='recomp'):
+    if target not in ('recomp', 'ryujinx'):
+        raise ValueError('Unknown sound runtime target')
+    tag = 'sound' if target == 'recomp' else 'sound-ryujinx'
+    obj, elf = OUT/('regression/' + tag + '.o'), OUT/('regression/' + tag + '.elf')
     run('clang','--target=armv7a-none-eabihf','-mcpu=cortex-a57','-marm','-mfloat-abi=hard',
-        '-ffreestanding','-fno-builtin','-nostdlib','-O2','-ffunction-sections','-fdata-sections','-DMS_RECOMP',
+        '-ffreestanding','-fno-builtin','-nostdlib','-O2','-ffunction-sections','-fdata-sections',
+        *(['-DMS_RECOMP'] if target == 'recomp' else []),
         '-fno-unwind-tables','-fno-asynchronous-unwind-tables','-I',MS/'module','-I',UPMOD,
         '-I',HERE/'tests','-c',HERE/'tests/sound_harness.c','-o',obj)
     run('ld.lld','-m','armelf_linux_eabi','-static','--gc-sections','--image-base=0x10000',

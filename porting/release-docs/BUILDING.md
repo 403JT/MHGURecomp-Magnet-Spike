@@ -44,6 +44,12 @@ catalogue/smithy assets, sound conversion, command rebuilding and module linking
 See the respective scripts' entry points and upstream source notes. This alpha
 does not claim a tested one-command clean-room source build.
 
-`package_public_release.py` packages a validated local mod. It refuses unknown
+`package_public_release.py` packages the historical alpha.1 build. It refuses unknown
 payload files and creates a source-only repository staging tree and separate
 release attachments. It does not publish anything by itself.
+
+`package_feedback_release.py` stages alpha.2 from the tested cumulative
+feedback candidate, preserving all 56 payload files and checking the matching
+validation receipt. `FEEDBACK_FIXES.md` describes the changes and remaining
+reports. Historical old/new regression comparisons require the locally kept
+source checkpoints; they are not bundled with game inputs, saves or captures.

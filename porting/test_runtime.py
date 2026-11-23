@@ -21,14 +21,20 @@ PROXY, PEL, RECORDS, RECORD = 0x0c001000, 0x0c002000, 0x0c003000, 0x0c004000
 RET, STACK, STALE = 0x70000000, 0x71010000, 0x0e000000
 
 
-def compile_test(legacy=False):
-    name = 'legacy' if legacy else 'fixed'
+def compile_test(legacy=False, target='recomp'):
+    if target not in ('recomp', 'ryujinx'):
+        raise ValueError('Unknown runtime target')
+    if legacy and target != 'recomp':
+        raise ValueError('The historical regression baseline targets Recomp')
+    name = ('legacy' if legacy else 'fixed') + ('-ryujinx' if target == 'ryujinx' else '')
     BIN.mkdir(parents=True, exist_ok=True)
     obj, elf = BIN / (name + '.o'), BIN / (name + '.elf')
     flags = ['--target=armv7a-none-eabihf', '-mcpu=cortex-a57', '-marm', '-mfloat-abi=hard',
              '-ffreestanding', '-fno-builtin', '-nostdlib', '-O2', '-ffunction-sections', '-fdata-sections',
-             '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '-DMS_RECOMP',
+             '-fno-unwind-tables', '-fno-asynchronous-unwind-tables',
              '-I', MS / 'module', '-I', MS / 'gen', '-I', UPMOD]
+    if target == 'recomp':
+        flags.append('-DMS_RECOMP')
     if legacy:
         flags.append('-DMS_TEST_SOURCE="' + (HERE / 'reports/baseline-ms_act.c').as_posix() + '"')
     run('clang', *flags, '-c', TESTS / 'runtime_harness.c', '-o', obj)
@@ -39,7 +45,8 @@ def compile_test(legacy=False):
 
 
 class Emulator:
-    def __init__(self, binary):
+    def __init__(self, binary, heap_base=HEAP):
+        self.heap_base = heap_base
         data, self.symbols = binary
         self.uc = u = Uc(UC_ARCH_ARM, UC_MODE_ARM)
         u.ctl_set_cpu_model(A.UC_CPU_ARM_MAX)
@@ -55,14 +62,14 @@ class Emulator:
                     u.mem_map(page, 4096); pages.add(page)
             u.mem_write(va, data[off:off + fsize])
         u.mem_map(BASE, 0x2200000)
-        u.mem_map(HEAP, 0x400000)
+        u.mem_map(heap_base, 0x400000)
         u.mem_map(RET, 4096)
         u.mem_map(STACK - 0x10000, 0x10000)
         u.reg_write(A.UC_ARM_REG_C1_C0_2, 0xf << 20)
         u.reg_write(A.UC_ARM_REG_FPEXC, 0x40000000)
         self.calls = {'post': 0, 'move': 0, 'stop': 0, 'action': 0}
         self.monster = 0
-        self.w32(BASE + 0x1851fe0, HEAP + 0x30000)
+        self.w32(BASE + 0x1851fe0, heap_base + 0x30000)
         u.hook_add(UC_HOOK_CODE, self.engine, begin=BASE, end=BASE + 0x2200000 - 1)
 
     def w32(self, at, value): self.uc.mem_write(at, struct.pack('<I', value))
@@ -95,7 +102,7 @@ class Emulator:
         elif offset == 0x40b50: pass
         elif offset == 0x282548:
             self.calls['post'] += 1
-            hp = HEAP + 0x100000 + self.calls['post'] * 0x1000
+            hp = self.heap_base + 0x100000 + self.calls['post'] * 0x1000
             self.proxy(hp, u.reg_read(A.UC_ARM_REG_R3))
             u.reg_write(A.UC_ARM_REG_R0, hp)
         else:
@@ -114,45 +121,47 @@ class Emulator:
         return u.reg_read(A.UC_ARM_REG_R0)
 
 
-def suite(binary):
-    e = Emulator(binary)
+def suite(binary, heap_base=HEAP):
+    e = Emulator(binary, heap_base)
+    proxy, pel = heap_base + 0x1000, heap_base + 0x2000
+    player, carrier, vector = heap_base + 0x10000, heap_base + 0x20000, heap_base + 0x21000
     checks = {}
-    checks['recomp_heap_pointer'] = e.call('test_pointer', PROXY) == 1
-    checks['invalid_pointer_rejected'] = all(e.call('test_pointer', p) == 0 for p in (0, 0x3000000, PROXY + 1, 0xf0000000))
+    checks['recomp_heap_pointer' if heap_base == HEAP else 'ryujinx_heap_pointer'] = e.call('test_pointer', proxy) == 1
+    checks['invalid_pointer_rejected'] = all(e.call('test_pointer', p) == 0 for p in (0, 0x3000000, proxy + 1, 0xf0000000))
     ident = e.call('test_shot_id')
-    e.proxy(PROXY, ident)
-    checks['live_proxy_owned'] = e.call('test_owned', PROXY, ident) == 1
-    checks['reused_proxy_rejected'] = e.call('test_owned', PROXY, ident + 1) == 0
-    e.call('test_carrier', CARRIER, PROXY, ident)
-    e.w32(PLAYER + 0x3304, PEL)
-    e.uc.mem_write(VECTOR, struct.pack('<3f', 0, 0, 0))
+    e.proxy(proxy, ident)
+    checks['live_proxy_owned'] = e.call('test_owned', proxy, ident) == 1
+    checks['reused_proxy_rejected'] = e.call('test_owned', proxy, ident + 1) == 0
+    e.call('test_carrier', carrier, proxy, ident)
+    e.w32(player + 0x3304, pel)
+    e.uc.mem_write(vector, struct.pack('<3f', 0, 0, 0))
     for _ in range(600):
-        e.call('test_follow', PLAYER, CARRIER, VECTOR)
+        e.call('test_follow', player, carrier, vector)
     checks['600_updates_reuse_proxy'] = e.calls['move'] == 600 and e.calls['post'] == 0
-    e.call('test_stop', CARRIER)
+    e.call('test_stop', carrier)
     checks['carrier_stopped_once'] = e.calls['stop'] == 1
-    e.call('test_stop', CARRIER)
+    e.call('test_stop', carrier)
     checks['second_stop_is_noop'] = e.calls['stop'] == 1
     for function, expected in [('test_marker', 0), ('test_pin_start', 1), ('test_pin_tick', 1)]:
         try:
-            checks[function + '_removed_target'] = e.call(function, PLAYER, STALE, VECTOR) == expected
+            checks[function + '_removed_target'] = e.call(function, player, STALE, vector) == expected
         except UcError:
             checks[function + '_removed_target'] = False
-    monster, record = HEAP + 0x300000, HEAP + 0x320000
+    monster, record = heap_base + 0x300000, heap_base + 0x320000
     e.monster = monster
     e.w32(monster + 0x1428, record)
     e.w32(record + 0x370, 100)
     e.uc.mem_write(monster + 0x1054, b'\x01')
-    e.uc.mem_write(PLAYER + 0x1054, b'\x01')
+    e.uc.mem_write(player + 0x1054, b'\x01')
     e.uc.mem_write(record + 0x40, struct.pack('<3f', 10, 20, 30))
-    checks['live_marker_target_kept'] = e.call('test_marker', PLAYER, monster, VECTOR) == 1 and \
-        struct.unpack('<3f', e.uc.mem_read(VECTOR, 12)) == (10.0, 320.0, 30.0)
-    checks['live_pin_target_kept'] = e.call('test_pin_start', PLAYER, monster) == 0
+    checks['live_marker_target_kept'] = e.call('test_marker', player, monster, vector) == 1 and \
+        struct.unpack('<3f', e.uc.mem_read(vector, 12)) == (10.0, 320.0, 30.0)
+    checks['live_pin_target_kept'] = e.call('test_pin_start', player, monster) == 0
     e.w32(record + 0x370, 0)
-    checks['dead_marker_target_rejected'] = e.call('test_marker', PLAYER, monster, VECTOR) == 0
+    checks['dead_marker_target_rejected'] = e.call('test_marker', player, monster, vector) == 0
     e.w32(record + 0x370, 100)
     e.uc.mem_write(monster + 0x1054, b'\x02')
-    checks['other_area_marker_rejected'] = e.call('test_marker', PLAYER, monster, VECTOR) == 0
+    checks['other_area_marker_rejected'] = e.call('test_marker', player, monster, vector) == 0
     return checks, e.calls
 
 

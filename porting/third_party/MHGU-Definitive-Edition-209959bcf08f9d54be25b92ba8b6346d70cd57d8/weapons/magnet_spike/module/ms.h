@@ -87,6 +87,8 @@ struct ms_state {
     float pin_hold, pin_cd, qte, pin_off[3];
     uint16_t pin_yaw_m, pin_yaw_p;
     uint16_t armed[2];              /* hit-data entry armed in each attack slot */
+    const uint8_t *armed_resource[2]; /* identity of our native slot after arming */
+    uint32_t armed_shape[2];
     uint16_t chk_hit;               /* hit check pending (ms_act.c hit_check) at motion frame chk_f */
     float chk_f;
     uint8_t tr_n, tr_slot;          /* attack-slot trace (ms_act.c slot_trace): updates left, slot */
@@ -134,6 +136,7 @@ float ms_motion_start(uint8_t *p,uint32_t motion);
 void ms_apply_hit_stats(uint8_t *p,unsigned slot,unsigned hit);
 void ms_world_hit_armed(uint8_t *p,unsigned slot,unsigned hit,int world);
 void ms_world_hits_reset(uint8_t *p);
+int ms_attack_matches(uint8_t *p,const struct ms_state *s,unsigned slot);
 void ms_cancel_windows_reset(uint8_t *p);
 int ms_monster_pin_begin(uint8_t *p,uint8_t *m);
 void ms_monster_pin_end(uint8_t *p);

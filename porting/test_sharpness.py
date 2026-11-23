@@ -4,7 +4,7 @@ Native code and source tables are read locally and never exported. Only counts,
 pass/fail findings, and hashes enter the report. Unrelated resource services and
 sound notifications use bounded fixtures; sharpness arithmetic stays native.
 """
-import json,struct
+import argparse,json,struct
 from unicorn import Uc,UC_ARCH_ARM,UC_MODE_ARM,UC_HOOK_CODE
 from unicorn import arm_const as A
 from build_module import HERE
@@ -98,6 +98,10 @@ class NativeSharpness:
 
 
 def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--functional-only',action='store_true',
+        help='Run sharpness behavior gates for a later code revision; retain the historical packaging audit separately')
+    args=parser.parse_args()
     tables,*_=audit();base=tables['base'][0];rows=tables['level'][0]
     kire,_=table(entries('nativeNX/loc/arc/resident.arc'),'kireajiData',14)
     image=(HERE/'work/gu_main/mem.bin').read_bytes()
@@ -114,6 +118,10 @@ def main():
         'mask_adds_only_equipment_type_12':int.from_bytes(patches[SITE],'little') ^ struct.unpack_from('<I',image,SITE)[0]==0x10000,
         'module_and_all_assets_byte_identical':changed==['exefs\\FB08F1D20FD1204FE7070672777F869B.ips'],
     }
+    historical={}
+    if args.functional_only:
+        for key in ('only_one_added_IPS_record','module_and_all_assets_byte_identical'):
+            historical[key]=checks.pop(key)
     old=NativeSharpness(image,kire,None);new=NativeSharpness(image,kire,patches[SITE])
     getter_ok=legacy_ok=skills_ok=colours_ok=restore_ok=True;legacy_cases=0
     colour_counts={};restoration_cases=0
@@ -157,12 +165,14 @@ def main():
         native_whetstone_recovers_from_red_to_full_without_overfill=bool(restore_ok),
         every_other_equipment_type_keeps_original_result=bool(unrelated))
     report={'revision':'sharpness-1','all_passed':all(checks.values()),'checks':checks,
+        'functional_only':args.functional_only,'historical_sharpness_only_packaging_audit':historical,
         'levels_checked':len(rows),'old_nonzero_level_regressions_reproduced':legacy_cases,
         'skill_cases':len(rows)*3,'native_whetstone_calls':restoration_cases,
         'top_colour_counts':colour_counts,'mod_files':candidate,
         'IPS_sha256':sha(next((mod/'exefs').glob('*.ips'))),
         'scope':'Original GU ARM getters, Handicraft calculation, colour lookup and whetstone restoration. Synthetic bounded equipment/hunter fixtures; native game validation separate.'}
-    (HERE/'reports/sharpness-regression.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
+    output='sharpness-functional-regression.json' if args.functional_only else 'sharpness-regression.json'
+    (HERE/'reports'/output).write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
     print('Sharpness checks:',sum(checks.values()),'/',len(checks),'levels:',len(rows),'whetstone calls:',restoration_cases,flush=True)
     assert report['all_passed'],checks
 

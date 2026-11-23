@@ -1,144 +1,173 @@
 {
-  "mod_version": "v0.1.0-alpha.1",
-  "build_revision": "sharpness-1",
-  "game": "MHGU 1.4.0",
+  "mod_version": "v0.1.0-alpha.2",
+  "build_revision": "feedback-2",
+  "target": "recomp",
+  "game": "MHGU 1.4.0 English",
   "runtime": "official MHGURecomp 0.18.0 Windows x64",
-  "language": "English",
-  "module_sha256": "5041e364e88dc2cf0dde68141085b7ea95fe2b5103ec43eb35b82a07bda3409d",
-  "normal_builtin_mod_loader": true,
-  "runtime_executable_sha256": "286be3af1fe5aee7649bb548c33d550b8d52e97f931eafc9db6d6c030d6571b7",
-  "change": "One equipment-type mask admits type12 to the native sharpness-level getter.",
-  "code_module_and_all_assets_identical_to_recovery_1": true,
-  "tests": [
+  "module_sha256": "6c87cf5c64a9061eeb2588205bc87a85c055a34b3847cd28bd1143e58a9f8b30",
+  "ips_sha256": "34d6442b26bb9d11502f17336bdee2abd6993170ac17e2a5c45f8744b5dc5743",
+  "all_focused_checks_passed": true,
+  "validation_checks": {
+    "state_pool_passes": true,
+    "repeat_hits_passes": true,
+    "recovery_passes": true,
+    "quick_message_passes": true,
+    "damage_passes": true,
+    "marker_passes": true,
+    "aim_passes": true,
+    "sharpness_passes": true,
+    "balance_passes": true,
+    "combo_recovery_passes": true,
+    "native_cancellation_passes": true,
+    "native_double_slash_passes": true,
+    "native_recovery_passes": true,
+    "native_marker_remote_passes": true,
+    "native_marker_local_passes": true,
+    "same_56_payload_paths": true,
+    "54_assets_preserved_since_public_release": true,
+    "two_added_hooks_since_public": true,
+    "one_added_hook_since_candidate_1": true,
+    "sharpness_patch_preserved": true,
+    "recovery_durations_preserved": true,
+    "balance_policy_preserved": true,
+    "command_converter_preserved": true,
+    "other_weapon_sources_preserved": true,
+    "other_local_sources_preserved": true,
+    "header_only_adds_attack_identity": true,
+    "marker_implementation_preserved": true,
+    "shot_step_implementation_preserved": true,
+    "marker_shot_implementation_preserved": true,
+    "fx_follow_implementation_preserved": true,
+    "att_start_implementation_preserved": true,
+    "attraction_implementation_preserved": true,
+    "pin_start_implementation_preserved": true,
+    "pin_tick_implementation_preserved": true,
+    "charge_tick_implementation_preserved": true,
+    "aim_look_implementation_preserved": true,
+    "aim_frame_implementation_preserved": true,
+    "native_cancellation_exact_final_payload": true,
+    "native_cancellation_clean_muted_exit_safe_saves": true,
+    "native_double_slash_exact_final_payload": true,
+    "native_double_slash_clean_muted_exit_safe_saves": true,
+    "native_recovery_exact_final_payload": true,
+    "native_recovery_clean_muted_exit_safe_saves": true,
+    "native_marker_remote_exact_final_payload": true,
+    "native_marker_remote_clean_muted_exit_safe_saves": true,
+    "native_marker_local_exact_final_payload": true,
+    "native_marker_local_clean_muted_exit_safe_saves": true,
+    "old_live_cancelled_hitboxes_reproduced": true,
+    "old_detached_remote_marker_reproduced": true,
+    "old_cancellation_checkpoint_payload_and_safe_exit": true,
+    "old_marker_checkpoint_payload_and_safe_exit": true,
+    "no_temporary_marker_tracing": true
+  },
+  "validation_gate_count": 52,
+  "regression_counts": {
+    "damage_cancellation": 61,
+    "marker_tasks": 190,
+    "state_pool": 80,
+    "recovery": 2031,
+    "quick_message": 261,
+    "combo_recovery": 441,
+    "balance": 11,
+    "sharpness_levels": 959,
+    "sharpness_skill_cases": 2877,
+    "native_whetstone_calls": 17262
+  },
+  "native_tests": [
     {
-      "scenario": "Native ARM sharpness getters, colours, skills and Whetstone restoration",
+      "scenario": "native_cancellation",
+      "runtime": "official Windows MHGURecomp 0.18.0",
+      "runtime_sha256": "286be3af1fe5aee7649bb548c33d550b8d52e97f931eafc9db6d6c030d6571b7",
+      "cases": 4,
       "passed": true,
-      "levels": 959,
-      "Handicraft_cases": 2877,
-      "restoration_calls": 17262,
-      "checks": {
-        "only_one_added_IPS_record": true,
-        "mask_adds_only_equipment_type_12": true,
-        "module_and_all_assets_byte_identical": true,
-        "all_959_native_GS_and_MS_sharpness_levels_match": true,
-        "old_getter_reproduces_zero_sharpness_level": true,
-        "Handicraft_0_1_2_native_calculation_and_cap": true,
-        "all_native_colours_match_the_original_GS_bars": true,
-        "native_whetstone_recovers_from_red_to_full_without_overfill": true,
-        "every_other_equipment_type_keeps_original_result": true
-      }
+      "muted": true,
+      "source_saves_unchanged": true,
+      "clean_exit": true
     },
     {
-      "scenario": "Real collision and ordinary Whetstone use",
+      "scenario": "native_double_slash",
+      "runtime": "official Windows MHGURecomp 0.18.0",
+      "runtime_sha256": "286be3af1fe5aee7649bb548c33d550b8d52e97f931eafc9db6d6c030d6571b7",
+      "cases": 5,
       "passed": true,
-      "checks": {
-        "normal_exit": true,
-        "correct_starting_sharpness": true,
-        "no_fatal": true,
-        "source_saves_unchanged": true,
-        "candidate_unchanged": true,
-        "muted": true,
-        "normal_whetstone_restored_lost_sharpness": true
-      },
-      "weapon_id": 1,
-      "level": 11,
-      "starting_sharpness": {
-        "current": 400,
-        "maximum": 400,
-        "colour": 5
-      },
-      "loss_and_recovery": {
-        "before": {
-          "current": 399,
-          "maximum": 400,
-          "colour": 5
-        },
-        "after": {
-          "current": 400,
-          "maximum": 400,
-          "colour": 5
-        },
-        "normal_item_buttons": "Y to sheathe, mouse wheel to select the sole pouch item, Y to use Whetstone"
-      }
+      "muted": true,
+      "source_saves_unchanged": true,
+      "clean_exit": true
     },
     {
-      "scenario": "Previously red-capped family",
+      "scenario": "native_recovery",
+      "runtime": "official Windows MHGURecomp 0.18.0",
+      "runtime_sha256": "286be3af1fe5aee7649bb548c33d550b8d52e97f931eafc9db6d6c030d6571b7",
+      "cases": 1,
       "passed": true,
-      "checks": {
-        "normal_exit": true,
-        "correct_starting_sharpness": true,
-        "no_fatal": true,
-        "source_saves_unchanged": true,
-        "candidate_unchanged": true,
-        "muted": true
-      },
-      "weapon_id": 4,
-      "level": 1,
-      "starting_sharpness": {
-        "current": 300,
-        "maximum": 300,
-        "colour": 4
-      }
+      "muted": true,
+      "source_saves_unchanged": true,
+      "clean_exit": true
     },
     {
-      "scenario": "Previously crafted equipment, no weapon-entry edit",
+      "scenario": "native_marker_remote",
+      "runtime": "instrumented Recomp",
+      "runtime_sha256": "d8cb5f527abba7ab8a92ba70f8d45fe5d9219b518409bf6d9afbb034c4af7fce",
+      "cases": 4,
       "passed": true,
-      "checks": {
-        "normal_exit": true,
-        "correct_starting_sharpness": true,
-        "no_fatal": true,
-        "source_saves_unchanged": true,
-        "candidate_unchanged": true,
-        "muted": true
-      },
-      "weapon_id": 104,
-      "level": 2,
-      "starting_sharpness": {
-        "current": 400,
-        "maximum": 400,
-        "colour": 5
-      }
+      "muted": true,
+      "source_saves_unchanged": true,
+      "clean_exit": true
+    },
+    {
+      "scenario": "native_marker_local",
+      "runtime": "instrumented Recomp",
+      "runtime_sha256": "d8cb5f527abba7ab8a92ba70f8d45fe5d9219b518409bf6d9afbb034c4af7fce",
+      "cases": 5,
+      "passed": true,
+      "muted": true,
+      "source_saves_unchanged": true,
+      "clean_exit": true
     }
   ],
-  "historical_recovery_1_smoke_tests": [
-    {
-      "scenario": "Equipped Magnet Spike: startup, normal right-button combo and finisher recovery",
-      "passed": true,
-      "checks": {
-        "normal_exit": true,
-        "no_fatal": true,
-        "source_saves_unchanged": true,
-        "release_payload_unchanged": true,
-        "module_started": true,
-        "normal_mod_loader_saw_romfs": true,
-        "ready_condition_seen": true,
-        "muted": true,
-        "normal_three_hit_combo": true,
-        "finisher_recovery": true
-      }
-    },
-    {
-      "scenario": "Unmodified save with no Magnet Spike gear: normal town startup",
-      "passed": true,
-      "checks": {
-        "normal_exit": true,
-        "no_fatal": true,
-        "source_saves_unchanged": true,
-        "release_payload_unchanged": true,
-        "module_started": true,
-        "normal_mod_loader_saw_romfs": true,
-        "ready_condition_seen": true,
-        "muted": true,
-        "no_preinjected_weapon": true
-      }
-    }
+  "unchanged": [
+    "all 54 RomFS assets",
+    "weapon IDs and smithy recipes",
+    "damage values",
+    "combo links and recovery durations",
+    "marker/shot attachment math",
+    "guard windows and gauge costs",
+    "scope selection",
+    "attraction physics"
   ],
-  "historical_test_scope": "Before this single-mask fix; module and assets are byte-identical. Only the current sharpness cases above used the updated IPS.",
+  "connected_multiplayer_tested": false,
+  "diablos_play_tested": false,
+  "full_play_validation_complete": false,
+  "full_frontier_parity": false,
+  "remaining_reports": [
+    "Connected multiplayer pin firing, marker tracking, attraction and interrupted attacks need a real hunt retest",
+    "The specific intermittent R+X freeze remains unconfirmed",
+    "Parry deferred by user; scope and attraction physics unchanged"
+  ],
   "limits": [
-    "These are focused smoke tests, not a complete hunt campaign.",
-    "No fresh smithy transaction was performed on the official0.18.0 runtime in these smoke tests; prior crafting evidence used the same guest game and mod code.",
-    "Multiplayer, other languages/platforms and general mod combinations are not validated.",
-    "Long-hunt, faint/capture/multiple-large-monster coverage remains incomplete.",
-    "Focused sharpness correction, no new full-hunt or damage-balance guarantee."
-  ]
+    "Focused fixtures are not connected multiplayer hunts.",
+    "The intermittent R+X and parry freezes remain unconfirmed.",
+    "The glow fix addresses a reproduced remote-update cause, not every possible occurrence.",
+    "Broad long-hunt lifecycle coverage, other platforms/languages and mod combinations remain unvalidated."
+  ],
+  "evidence_sha256": {
+    "state_pool": "c786feaaf03752316774f1f1bcff09a1eaf0679a6acfc86b8c66be2d9964b794",
+    "repeat_hits": "fb1e3137767a95a3004e6f6118a06de73a6b33ee2eff9b10fc85d8fc7c09f373",
+    "recovery": "a24cc8446684599dd52a8d167cbf688a0bb158b3a353f5f65dd5011e69f28ff7",
+    "quick_message": "4259f45f59c560a5e377254cfd5ec97ff8505ef6a9ede5b5bad5b751d8df0383",
+    "damage": "9f9275f1d3147df8bdf33ca5f388fbd66258175db9029af1c7cd29e4a55ed679",
+    "marker": "1c69e2ee0db896ffa5bc58c183cfdc4146b3fb048b2bf51717b624d25e33e6e1",
+    "aim": "f893821354adeaf2167c846ab296a6a92b8cc15ed61a1b5ebe73d84c0575563f",
+    "sharpness": "4eb60a11a7ea1ae2af14a0f64dd0c9d34230a4117c43ca0f051bfeca708ace7a",
+    "balance": "2b6148c87dd9e0502a2ae3e5bc687c89b074808575d78418c0d6d54ab0f697eb",
+    "combo_recovery": "d1b7e033e1e960c559220c27d715a7999ce7d9351e12e051b917c8912e4aab71",
+    "native_cancellation": "3369439ed8d78f1f962a6aef3fba519e9e24493495811a335ed1fb76caeba8e0",
+    "native_double_slash": "f0611b3c9486b67c3b2135d34f994924670ce03b69b5dac49587158080d7ff04",
+    "native_recovery": "6d23e83b92662842677dbc38bfdf190292e3c3acce7aef43d80f3ac66ebc2cb8",
+    "native_marker_remote": "c397894c73fc7db5fb33e6178e1923e5817c676071076ee9829b793fef76b0e0",
+    "native_marker_local": "d137ebf539ddcfc4dbc19419871d18458d6a7f34296f07aada1b6545eccf7dd4",
+    "old_cancellation": "ec40f4f14f970df911023dd0ab9a76135f27d25bf35a280db75a1fe2a1d5c835",
+    "old_marker": "93f988607f765e85bf7c2bbff984d0cad9dda5fa6f8c154700536da2b4ec557a"
+  }
 }

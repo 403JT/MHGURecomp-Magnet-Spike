@@ -20,13 +20,13 @@ def builder():
     return build
 
 
-def compile_test(build, fixed, handled):
-    name = f'hook-{fixed}-{handled}'
+def compile_test(build, fixed, handled, target='recomp'):
+    name = f'hook-{fixed}-{handled}' + ('-ryujinx' if target == 'ryujinx' else '')
     source, obj, elf = [BIN / (name + suffix) for suffix in ('.S', '.o', '.elf')]
     image = bytearray(0x200)
     # Conditional add needs the incoming Z flag. The second instruction is neutral.
     struct.pack_into('<2I', image, 0x100, 0x02800001, 0xe1a05005)
-    make = hook_codegen.trampoline if fixed else lambda b, i, n, s: b.trampoline(i, n, s)
+    make = (lambda b, i, n, s: hook_codegen.trampoline(b, i, n, s, target)) if fixed else lambda b, i, n, s: b.trampoline(i, n, s)
     assembly = make(build, image, 'fixture', 0x100)
     callback = '''
     .text
@@ -38,6 +38,7 @@ fixture_c:
     vmov.i32 q15, #0
     mov r2, #0x400000
     vmsr fpscr, r2
+    uadd8 r2, r2, r2
 '''
     if handled:
         callback += '    mov r2, #0x55000000\n    str r2, [r0]\n'
@@ -51,12 +52,12 @@ fixture_c:
     return data, symbols(data)
 
 
-def suite(build, fixed):
+def suite(build, fixed, target='recomp'):
     checks = {'conditional_instruction': True, 'all_fp_registers': True, 'fpscr': True,
               'integer_registers': True, 'status_flags': True, 'handled_register_edit': True}
     for handled in (False, True):
-        binary = compile_test(build, fixed, handled)
-        for flags in (0, 0x40000000, 0xa80f0000):
+        binary = compile_test(build, fixed, handled, target)
+        for flags in (0, 0x40000000, *[0xa8000000 | (ge << 16) for ge in range(16)]):
             e = Emulator(binary)
             u = e.uc
             integers = [0x1000 + i * 16 for i in range(13)]
@@ -85,9 +86,12 @@ def main():
     BIN.mkdir(parents=True, exist_ok=True)
     build = builder()
     legacy, fixed = suite(build, False), suite(build, True)
+    ryujinx = suite(build, True, 'ryujinx')
     assert not legacy['conditional_instruction'] and not legacy['all_fp_registers'] and not legacy['fpscr'], legacy
     assert all(fixed.values()), fixed
-    report = {'legacy': legacy, 'fixed': fixed}
+    assert all(ryujinx.values()), ryujinx
+    report = {'legacy': legacy, 'fixed': fixed, 'ryujinx': ryujinx,
+              'ge_patterns_per_runtime': 16, 'handled_and_fallthrough_tested': True}
     (HERE / 'reports/hook-regression.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
     print(json.dumps(report, indent=2))
 
